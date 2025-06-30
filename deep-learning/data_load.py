@@ -4,6 +4,9 @@ import torch.utils.data as Data
 from PIL import Image
 import os
 import sys
+import errno
+from torchvision import datasets, transforms
+
 if sys.version_info[0] == 2:
     import cPickle as pickle
 else:
@@ -11,163 +14,81 @@ else:
 
 import data_tools as tools
 
+class Mnist(torch.utils.data.Dataset):
+    def __init__(self, root, train=True, download=True, transform=None, target_transform=None,
+                 dataset=None, noise_type=None, noise_rate=None, split_per=0.9, random_seed=1):
 
-class Mnist(Data.Dataset):
-    urls = [
-        'http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz',
-        'http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz',
-        'http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz',
-        'http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz',
-    ]
-    raw_folder = 'raw'
-    processed_folder = 'processed'
-    training_file = 'training.pt'
-    test_file = 'test.pt'
+        if transform is None:
+            transform = transforms.ToTensor()
+        if target_transform is None:
+            target_transform = lambda y: y
 
-    def __init__(self, root, 
-                 train=True, transform=None, target_transform=None, download=False,
-                 dataset='mnist', noise_type='symmetric', noise_rate=0.5, split_per=0.9, random_seed=1, num_class=10):
-        self.root = os.path.join(os.path.expanduser(root), 'MNIST')
+        raw_dataset = datasets.MNIST(
+            root=root,
+            train=train,
+            download=download,
+            transform=transform,
+            target_transform=target_transform
+        )
+
+        self.train = train
         self.transform = transform
         self.target_transform = target_transform
-        self.train = train 
 
-        if download:
-            self.download()
+        # Extract data and labels
+        images = raw_dataset.data
+        labels = np.array(raw_dataset.targets)
 
-        if not self._check_exists():
-            raise RuntimeError('Dataset not found.' +
-                               ' You can use download=True to download it')
-
-        self.train_data, self.train_labels = torch.load(
-            os.path.join(self.root, self.processed_folder, self.training_file))
-        self.train_labels = np.array(self.train_labels)
-
-        # clean images and noisy labels (training and validation)
+        # Apply label noise if requested
         if noise_rate > 0:
-            self.train_data, self.val_data, self.train_labels, self.val_labels, self.noise_mask = tools.dataset_split(
-                self.train_data, self.train_labels, dataset, noise_type, noise_rate, split_per, random_seed, num_class
+            data_split = tools.dataset_split(
+                images, labels, dataset, noise_type, noise_rate,
+                split_per, random_seed, 10
             )
         else:
-            self.train_data, self.val_data, self.train_labels, self.val_labels, self.noise_mask = tools.dataset_split_without_noise(
-                self.train_data, self.train_labels, split_per, random_seed
+            data_split = tools.dataset_split_without_noise(
+                images, labels, split_per, random_seed
             )
+
+        self.train_data, self.val_data, self.train_labels, self.val_labels, self.noise_mask = data_split
 
     def __getitem__(self, index):
         if self.train:
             img, label = self.train_data[index], self.train_labels[index]
         else:
             img, label = self.val_data[index], self.val_labels[index]
-            
+
         img = Image.fromarray(img.numpy())
-           
         if self.transform is not None:
             img = self.transform(img)
-            
         if self.target_transform is not None:
             label = self.target_transform(label)
-     
         return img, label, index
 
-    def __len__(self):            
-        if self.train:
-            return len(self.train_data)
-        else:
-            return len(self.val_data)
-
-    def _check_exists(self):
-        return os.path.exists(os.path.join(self.root, self.processed_folder, self.training_file)) and \
-            os.path.exists(os.path.join(self.root, self.processed_folder, self.test_file))
-
-    def download(self):
-        """Download the MNIST data if it doesn't exist in processed_folder already."""
-        from six.moves import urllib
-        import gzip
-
-        if self._check_exists():
-            return
-
-        # download files
-        try:
-            os.makedirs(os.path.join(self.root, self.raw_folder))
-            os.makedirs(os.path.join(self.root, self.processed_folder))
-        except OSError as e:
-            if e.errno == errno.EEXIST:
-                pass
-            else:
-                raise
-
-        for url in self.urls:
-            print('Downloading ' + url)
-            data = urllib.request.urlopen(url)
-            filename = url.rpartition('/')[2]
-            file_path = os.path.join(self.root, self.raw_folder, filename)
-            with open(file_path, 'wb') as f:
-                f.write(data.read())
-            with open(file_path.replace('.gz', ''), 'wb') as out_f, \
-                    gzip.GzipFile(file_path) as zip_f:
-                out_f.write(zip_f.read())
-            os.unlink(file_path)
-
-        # process and save as torch files
-        print('Processing...')
-
-        training_set = (
-            tools.read_image_file(os.path.join(self.root, self.raw_folder, 'train-images-idx3-ubyte')),
-            tools.read_label_file(os.path.join(self.root, self.raw_folder, 'train-labels-idx1-ubyte'))
-        )
-        test_set = (
-            tools.read_image_file(os.path.join(self.root, self.raw_folder, 't10k-images-idx3-ubyte')),
-            tools.read_label_file(os.path.join(self.root, self.raw_folder, 't10k-labels-idx1-ubyte'))
-        )
-        with open(os.path.join(self.root, self.processed_folder, self.training_file), 'wb') as f:
-            torch.save(training_set, f)
-        with open(os.path.join(self.root, self.processed_folder, self.test_file), 'wb') as f:
-            torch.save(test_set, f)
-
-        print('Done!')
-
-    def __repr__(self):
-        fmt_str = 'Dataset ' + self.__class__.__name__ + '\n'
-        fmt_str += '    Number of datapoints: {}\n'.format(self.__len__())
-        tmp = 'train' if self.train is True else 'test'
-        fmt_str += '    Split: {}\n'.format(tmp)
-        fmt_str += '    Root Location: {}\n'.format(self.root)
-        tmp = '    Transforms (if any): '
-        fmt_str += '{0}{1}\n'.format(tmp, self.transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
-        tmp = '    Target Transforms (if any): '
-        fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
-        return fmt_str
- 
-
-class MnistTest(Data.Dataset):
-    processed_folder = 'processed'
-    test_file = 'test.pt'
-
-    def __init__(self, root, transform=None, target_transform=None):
-        self.root = os.path.join(os.path.expanduser(root), 'MNIST')
-        self.transform = transform
-        self.target_transform = target_transform
-
-        self.test_data, self.test_labels = torch.load(
-                os.path.join(self.root, self.processed_folder, self.test_file))
-        self.test_labels = np.array(self.test_labels)
-
-        
-    def __getitem__(self, index):
-        img, label = self.test_data[index], self.test_labels[index]
-        img = Image.fromarray(img.numpy())
-        
-        if self.transform is not None:
-            img = self.transform(img)
-            
-        if self.target_transform is not None:
-            label = self.target_transform(label)
-     
-        return img, label, index
-    
     def __len__(self):
-        return len(self.test_data)
+        return len(self.train_data) if self.train else len(self.val_data)
+
+class MnistTest(torch.utils.data.Dataset):
+    def __init__(self, root, transform=None, target_transform=None):
+        if transform is None:
+            transform = transforms.ToTensor()
+        if target_transform is None:
+            target_transform = lambda y: y
+
+        self.dataset = datasets.MNIST(
+            root=root,
+            train=False,
+            download=True,
+            transform=transform,
+            target_transform=target_transform
+        )
+
+    def __getitem__(self, index):
+        image, label = self.dataset[index]
+        return image, label, index
+
+    def __len__(self):
+        return len(self.dataset)
   
     
 class Cifar10(Data.Dataset):

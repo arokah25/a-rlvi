@@ -1,0 +1,2 @@
+epoch:	time_ep	tau	fix	clean,%	corr,%	train_acc	val_acc	test_acc
+0:	0	0	False	100	0	0	0	 10.0600

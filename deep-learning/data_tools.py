@@ -171,7 +171,7 @@ def noisify_pairflip(y_train, noise, random_state=1, nb_classes=10):
                                            random_state=random_state)
         actual_noise = (y_train_noisy != y_train).mean()
         assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
+        #print('Actual noise %.2f' % actual_noise)
         y_train = y_train_noisy
 
     return y_train, actual_noise,P
@@ -195,7 +195,7 @@ def noisify_multiclass_symmetric(y_train, noise, random_state=None, nb_classes=1
                                            random_state=random_state)
         actual_noise = (y_train_noisy != y_train).mean()
         assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
+        #print('Actual noise %.2f' % actual_noise)
         y_train = y_train_noisy
 
     return y_train, actual_noise,P
@@ -243,7 +243,7 @@ def noisify_multiclass_asymmetric_mnist(y_train, noise, random_state=None, nb_cl
     y_train_noisy = multiclass_noisify(y_train, P=P, random_state=random_state)
     actual_noise = (y_train_noisy != y_train).mean()
     assert actual_noise > 0.0
-    print('Actual noise %.2f' % actual_noise)
+    #print('Actual noise %.2f' % actual_noise)
 
     y_train = y_train_noisy
 
@@ -280,7 +280,7 @@ def noisify_multiclass_asymmetric_cifar10(y_train, noise, random_state=None, nb_
         for idx in noisy_sample_index:
             y_train_[idx] = t
     actual_noise = (y_train_ != np.array(y_train)).mean()
-    print('Actual noise %.2f' % actual_noise)
+    #print('Actual noise %.2f' % actual_noise)
     return y_train_, actual_noise, target_class
 
 def noisify_multiclass_asymmetric_cifar100(y_train, noise, random_state=None, nb_classes=100):
@@ -301,7 +301,7 @@ def noisify_multiclass_asymmetric_cifar100(y_train, noise, random_state=None, nb
             y_train_noisy = multiclass_noisify(np.array(y_train), P=P, random_state=random_state)
             actual_noise = (y_train_noisy != np.array(y_train)).mean()
         assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
+        #print('Actual noise %.2f' % actual_noise)
         targets = y_train_noisy
     return targets, actual_noise, P
 

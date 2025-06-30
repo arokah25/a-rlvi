@@ -17,13 +17,17 @@ from models.resnet import ResNet18, ResNet34
 # models with dropout for USDNL algorithm:
 from models.lenet import LeNetDO
 from models.resnet import ResNet18DO, ResNet34DO
+import warnings
+warnings.filterwarnings("ignore", message=".*intraop threads.*")
+from amortized.inference_net import InferenceNet
+
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--result_dir', type=str, help = 'dir to save result txt files', default='results/')
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100]', default='mnist')
-parser.add_argument('--method', type=str, help='[regular, rlvi, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
+parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.45)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
 parser.add_argument('--split_percentage', type=float, help='train and validation', default=0.9)
@@ -38,8 +42,14 @@ parser.add_argument('--exponent', type=float, default=1, help='exponent of the f
 
 args = parser.parse_args()
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# DEVICE = 'cpu'
+
+if torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+elif torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+else:
+    DEVICE = torch.device("cpu")
+
 
 # Seed
 np.random.seed(args.seed)
@@ -187,6 +197,11 @@ if not os.path.exists(save_dir):
 
 model_str = f"{args.dataset}_{args.method}_{args.noise_type}_{args.noise_rate}"
 txtfile = f"{save_dir}/{model_str}-s{args.seed}.txt"
+
+# Ensure the results directory exists before writing
+if not os.path.exists(os.path.dirname(txtfile)):
+    os.makedirs(os.path.dirname(txtfile))
+
 if os.path.exists(txtfile):
     curr_time = datetime.datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
     new_dest = f"{txtfile}.bak-{curr_time}"
@@ -194,6 +209,7 @@ if os.path.exists(txtfile):
 
 
 def run():
+    train_acc = 0.0
     # Data Loaders
     train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
                                                batch_size=args.batch_size,
@@ -246,7 +262,7 @@ def run():
             scheduler_sec = CosineAnnealingLR(optimizer_sec, T_max=200)
     
 
-    if args.method == 'rlvi':
+    if args.method in ['rlvi', 'arlvi']:
         sample_weights = torch.ones(len(train_dataset)).to(DEVICE)
         residuals = torch.zeros_like(sample_weights).to(DEVICE)
         overfit = False
@@ -260,6 +276,12 @@ def run():
     with open(txtfile, "a") as myfile:
         myfile.write("epoch:\ttime_ep\ttau\tfix\tclean,%\tcorr,%\ttrain_acc\tval_acc\ttest_acc\n")
         myfile.write(f"0:\t0\t0\t{False}\t100\t0\t0\t0\t{test_acc:8.4f}\n")
+
+ 
+    #initialize inference network for ARLVI
+    input_dim = train_dataset[0][0].numel()
+    inference_net = InferenceNet(input_dim).to(DEVICE)
+    optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_init)
 
     # Training
     for epoch in range(1, args.n_epoch):
@@ -278,6 +300,12 @@ def run():
                 train_loader, model, optimizer,
                 residuals, sample_weights, overfit, threshold
             )
+        elif args.method == "arlvi":
+            train_acc = methods.train_arlvi(
+                train_loader, model, optimizer, inference_net,
+                optimizer_inf, args
+            )
+
             # Check if overfitting has started
             val_acc = utils.evaluate(val_loader, model)
             if not overfit:

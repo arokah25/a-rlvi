@@ -49,17 +49,21 @@ def evaluate(test_loader, model):
     model.eval()
     correct = 0
     total = 0
+    device = next(model.parameters()).device  # dynamically get the model’s device
     with torch.no_grad():
         for images, labels, _ in test_loader:
-            images = Variable(images).to(DEVICE)
-            labels = Variable(labels).to(DEVICE)
+            images = images.to(device)
+            labels = labels.to(device)
+
             logits = model(images)
             outputs = F.softmax(logits, dim=1)
             _, pred = torch.max(outputs.data, 1)
             total += labels.size(0)
-            correct += (pred == labels).sum()
-        acc = 100 * float(correct) / float(total)
+            correct += (pred == labels).sum().item()
+
+    acc = 100 * float(correct) / float(total)
     return acc
+
 
 
 def accuracy(logit, target, topk=(1,)):
