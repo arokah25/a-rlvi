@@ -15,11 +15,12 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def train_regular(train_loader, model, optimizer):
     train_total = 0
     train_correct = 0
-
+    device = next(model.parameters()).device
+   
     for (images, labels, indexes) in train_loader:
+        images = images.to(device)
+        labels = labels.to(device)
 
-        images = Variable(images).to(DEVICE)
-        labels = Variable(labels).to(DEVICE)
         
         logits = model(images)
         

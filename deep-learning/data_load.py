@@ -7,12 +7,55 @@ import sys
 import errno
 from torchvision import datasets, transforms
 
+
 if sys.version_info[0] == 2:
     import cPickle as pickle
 else:
     import pickle
 
 import data_tools as tools
+
+class Food101(torch.utils.data.Dataset):
+    def __init__(self, root, train=True, transform=None, target_transform=None, split_per=0.9, random_seed=1):
+        from torchvision.datasets import Food101
+
+        self.transform = transform
+        self.target_transform = target_transform
+
+        # Load full dataset
+        full_dataset = Food101(root=root, download=True, split='train' if train else 'test')
+
+        # Use internal attributes
+        self.images = full_dataset._image_files
+        self.labels = full_dataset._labels  # Already integers, e.g., 0 to 100
+
+        # Split
+        self.indices = np.arange(len(self.images))
+        np.random.seed(random_seed)
+        np.random.shuffle(self.indices)
+
+        split_idx = int(len(self.indices) * split_per)
+        if train:
+            self.indices = self.indices[:split_idx]
+        else:
+            self.indices = self.indices[split_idx:]
+
+    def __getitem__(self, index):
+        idx = self.indices[index]
+        image = Image.open(self.images[idx]).convert('RGB')
+        label = self.labels[idx]
+
+        if self.transform:
+            image = self.transform(image)
+        if self.target_transform:
+            label = self.target_transform(label)
+
+        return image, label, idx
+
+    def __len__(self):
+        return len(self.indices)
+
+
 
 class Mnist(torch.utils.data.Dataset):
     def __init__(self, root, train=True, download=True, transform=None, target_transform=None,

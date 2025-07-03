@@ -14,6 +14,9 @@ import utils
 
 from models.lenet import LeNet
 from models.resnet import ResNet18, ResNet34
+from torchvision.models import ResNet50_Weights
+from torchvision.models import resnet50
+from torchvision import transforms
 # models with dropout for USDNL algorithm:
 from models.lenet import LeNetDO
 from models.resnet import ResNet18DO, ResNet34DO
@@ -26,8 +29,14 @@ from amortized.inference_net import InferenceNet
 parser = argparse.ArgumentParser()
 parser.add_argument('--result_dir', type=str, help = 'dir to save result txt files', default='results/')
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
-parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100]', default='mnist')
+parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
 parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
+#for ARLVI
+parser.add_argument('--lambda_kl', type=float, default=1.0,
+                    help='Weight for the KL divergence regularization term')
+parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
+
+
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.45)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
 parser.add_argument('--split_percentage', type=float, help='train and validation', default=0.9)
@@ -39,6 +48,9 @@ parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--forget_rate', type=float, help='forget rate', default=None)
 parser.add_argument('--num_gradual', type=int, default=10, help='how many epochs for linear drop rate, can be 5, 10, 15. This parameter is equal to Tk for R(T) in Co-teaching paper.')
 parser.add_argument('--exponent', type=float, default=1, help='exponent of the forget rate, can be 0.5, 1, 2. This parameter is equal to c in Tc for R(T) in Co-teaching paper.')
+parser.add_argument('--debug', action='store_true',
+                    help='Print debugging information during training')
+
 
 args = parser.parse_args()
 
@@ -56,6 +68,7 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 if DEVICE == "cuda":
     torch.cuda.manual_seed(args.seed)
+
 
 
 # Load datasets for training, validation, and testing
@@ -176,6 +189,51 @@ if args.dataset == 'cifar100':
     test_dataset = data_load.Cifar100Test(root=args.root_dir, 
                                             transform=Model.transform_test, 
                                             target_transform=data_tools.transform_target)
+# For Food101 dataset (for arlvi training):
+if args.dataset == 'food101':
+    input_channel = 3
+    num_classes = 101
+    args.n_epoch = 100
+    args.batch_size = 64
+    args.lr_init = 0.001
+    if args.wd is None:
+        args.wd = 1e-4
+
+    # Use existing ResNet model
+    if args.method != 'usdnl':
+        Model = ResNet18
+    else:
+        Model = ResNet18DO  # optional: with dropout
+
+    normalize = transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)
+    transform_train = transforms.Compose([
+        transforms.Resize(128),
+        transforms.CenterCrop(112),
+        transforms.ToTensor(),
+        normalize,
+    ])
+    transform_test = transforms.Compose([
+        transforms.Resize(128),
+        transforms.CenterCrop(112),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+    train_dataset = data_load.Food101(
+        root=args.root_dir,
+        train=True,
+        transform=transform_train,
+        split_per=args.split_percentage,
+        random_seed=args.seed
+    )
+    val_dataset = data_load.Food101(
+        root=args.root_dir,
+        train=False,
+        transform=transform_test,
+        split_per=args.split_percentage,
+        random_seed=args.seed
+    )
+    test_dataset = val_dataset  # Food101 only comes with 'train' split; no separate test set
 
 
 # For alternative methods:
@@ -207,6 +265,17 @@ if os.path.exists(txtfile):
     new_dest = f"{txtfile}.bak-{curr_time}"
     os.system(f"mv {txtfile} {new_dest}")
 
+class CombinedModel(torch.nn.Module):
+    def __init__(self, features, classifier):
+        super().__init__()
+        self.features = features
+        self.classifier = classifier
+
+    def forward(self, x):
+        z = self.features(x)              # shape: [B, 2048, 1, 1]
+        z = z.view(z.size(0), -1)         # shape: [B, 2048]
+        return self.classifier(z)         # shape: [B, 101]
+
 
 def run():
     train_acc = 0.0
@@ -232,9 +301,23 @@ def run():
                                               drop_last=False,
                                               shuffle=False,
                                               pin_memory=True)
-    
+
     # Prepare models and optimizers
-    model = Model(input_channel=input_channel, num_classes=num_classes)
+    if args.dataset == 'food101' and args.method == 'arlvi':
+        #backbone = full resnet model (pretrained on Imagenet) before we split it 
+        backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
+        # Replace the final FC layer to match Food101 (101 classes)
+        backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes)
+        # Split the model into a feature extractor and classifier
+        model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
+        model_classifier = backbone.fc
+
+        model = CombinedModel(model_features, model_classifier)
+
+    else:
+        model = Model(input_channel=input_channel, num_classes=num_classes)
+    
+
     model.to(DEVICE)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr_init, weight_decay=args.wd, momentum=args.momentum)
 
@@ -279,8 +362,9 @@ def run():
 
  
     #initialize inference network for ARLVI
-    input_dim = train_dataset[0][0].numel()
-    inference_net = InferenceNet(input_dim).to(DEVICE)
+    # Feature dimension is the output of ResNet’s penultimate layer
+    feature_dim = model.classifier.in_features # should be 2048 for ResNet50
+    inference_net = InferenceNet(feature_dim).to(DEVICE)
     optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_init)
 
     # Training
@@ -301,10 +385,19 @@ def run():
                 residuals, sample_weights, overfit, threshold
             )
         elif args.method == "arlvi":
-            train_acc = methods.train_arlvi(
-                train_loader, model, optimizer, inference_net,
-                optimizer_inf, args
+            train_loss, train_acc = methods.train_arlvi(
+                model_features=model_features,
+                model_classifier=model_classifier,
+                inference_net=inference_net,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                inference_optimizer=optimizer_inf,
+                device=DEVICE,
+                epoch=epoch,
+                lambda_kl=args.lambda_kl
             )
+
+
 
             # Check if overfitting has started
             val_acc = utils.evaluate(val_loader, model)
