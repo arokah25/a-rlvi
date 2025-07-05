@@ -71,10 +71,13 @@ def train_rlvi(train_loader, model, optimizer,
     -------
         train_acc : float - top-1 accuracy on training samples.
         threshold : float in [0; 1] - updated threshold, based on type II error criterion.
+        avg_loss : float - average weighted cross-entropy loss over the epoch.
     """
 
     train_total = 0
     train_correct = 0
+    total_loss = 0.0
+    total_seen = 0
 
     for (images, labels, indexes) in train_loader:
       
@@ -96,6 +99,9 @@ def train_rlvi(train_loader, model, optimizer,
         loss.backward()
         optimizer.step()
 
+        total_loss += loss.item() * images.size(0)
+        total_seen += images.size(0)
+
     update_sample_weights(residuals, weights)
     if overfit:
         # Regularization: truncate samples with high probability of corruption
@@ -103,4 +109,5 @@ def train_rlvi(train_loader, model, optimizer,
         weights[weights < threshold] = 0
 
     train_acc = float(train_correct) / float(train_total)
-    return train_acc, threshold
+    avg_loss = total_loss / total_seen
+    return train_acc, threshold, avg_loss

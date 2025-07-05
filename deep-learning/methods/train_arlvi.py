@@ -3,21 +3,9 @@ import torch.nn.functional as F
 
 
 def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: float) -> torch.Tensor:
-    """
-    Compute the KL divergence D_KL(Ber(pi_i) || Ber(pi_bar)) for each sample.
-
-    Args:
-        pi_i: Tensor of shape (batch_size,), belief scores per sample.
-        pi_bar: Scalar, the prior belief of being clean (e.g., 0.5)
-
-    Returns:
-        kl: Tensor of shape (batch_size,), KL divergence per sample.
-    """
     eps = 1e-6  # for numerical stability
-
     pi_i = pi_i.clamp(eps, 1 - eps)
     pi_bar = torch.tensor(pi_bar, device=pi_i.device)
-
     kl = pi_i * torch.log(pi_i / pi_bar) + (1 - pi_i) * torch.log((1 - pi_i) / (1 - pi_bar))
     return kl
 
@@ -34,25 +22,6 @@ def train_arlvi(
     lambda_kl: float = 1.0,
     pi_bar: float = 0.5,
 ):
-    """
-    One epoch of training using the A-RLVI method.
-
-    Args:
-        model_features: Feature extractor (e.g., ResNet without the final FC layer)
-        model_classifier: Final classification head (e.g., Linear layer)
-        inference_net: Inference network f_ϕ(zᵢ) predicting πᵢ ∈ (0, 1)
-        dataloader: Training data loader
-        optimizer: Optimizer for the model parameters
-        inference_optimizer: Optimizer for the inference network
-        device: torch device (CPU, MPS, CUDA)
-        epoch: Current epoch index (for logging/debugging)
-        lambda_kl: Weight for the KL regularization term
-        pi_bar: Prior belief (default: 0.5)
-
-    Returns:
-        total_loss_avg: Average training loss for this epoch
-        train_acc: Training accuracy over all batches
-    """
     model_features.train()
     model_classifier.train()
     inference_net.train()
@@ -60,48 +29,67 @@ def train_arlvi(
     total_correct = 0
     total_seen = 0
     total_loss = 0.0
+    total_ce = 0.0
+    total_kl = 0.0
 
-    for images, labels, _ in dataloader:
-        
-        images = images.to(device)            # [batch_size, 3, 112, 112]
-        labels = labels.to(device)            # [batch_size]
+    for batch_idx, (images, labels, _) in enumerate(dataloader):
+        images = images.to(device)
+        labels = labels.to(device)
         batch_size = images.size(0)
 
         # Step 1: Forward pass through feature extractor
-        z_i = model_features(images)          # [batch_size, 2048, 1, 1]
-        z_i = z_i.view(batch_size, -1)        # Flatten to [batch_size, 2048]
+        z_i = model_features(images)          # [B, 2048, 1, 1]
+        z_i = z_i.view(batch_size, -1)        # [B, 2048]
 
-        # Step 2: Get logits from classifier
-        logits = model_classifier(z_i)        # [batch_size, num_classes]
+        # Step 2: Get logits
+        logits = model_classifier(z_i)        # [B, num_classes]
 
-        # Step 3: Compute πᵢ from inference network
-        pi_i = inference_net(z_i)             # [batch_size], scalar per sample in (0, 1)
+        # Step 3: Compute πᵢ
+        pi_i = inference_net(z_i).clamp(1e-6, 1 - 1e-6)  # [B]
 
-        # Step 4: Cross-entropy loss per sample
-        ce_loss = F.cross_entropy(logits, labels, reduction='none')  # [batch_size]
+        # Step 4: Per-sample cross-entropy
+        ce_loss = F.cross_entropy(logits, labels, reduction='none')  # [B]
 
-        # Step 5: Compute KL divergence to prior
-        kl_loss = compute_kl_divergence(pi_i, pi_bar)                # [batch_size]
+        # Step 5: KL divergence
+        kl_loss = compute_kl_divergence(pi_i, pi_bar)                # [B]
 
-        # Step 6: Total loss: weighted CE + KL regularization
+        # Step 6: Total loss
         weighted_ce = (pi_i * ce_loss).mean()                        # scalar
         mean_kl = kl_loss.mean()                                     # scalar
         total_loss_batch = weighted_ce + lambda_kl * mean_kl         # scalar
 
-        # Backpropagation
+        # Backward + optimize
         optimizer.zero_grad()
         inference_optimizer.zero_grad()
         total_loss_batch.backward()
         optimizer.step()
         inference_optimizer.step()
 
-        # Track stats
+        # Stats
         total_loss += total_loss_batch.item() * batch_size
+        total_ce += weighted_ce.item() * batch_size
+        total_kl += mean_kl.item() * batch_size
         _, predicted = logits.max(1)
         total_correct += predicted.eq(labels).sum().item()
         total_seen += batch_size
 
-    avg_loss = total_loss / total_seen
-    train_acc = total_correct / total_seen
+        # -------- DEBUG LOGGING --------
+        if batch_idx % 100 == 0:
+            grad_norm = 0.0
+            for param in inference_net.parameters():
+                if param.grad is not None:
+                    grad_norm += param.grad.norm().item() ** 2
+            grad_norm = grad_norm ** 0.5
 
-    return avg_loss, train_acc
+            print(f"[Epoch {epoch} | Batch {batch_idx}]")
+            print(f"  πᵢ stats: mean={pi_i.mean().item():.4f}, min={pi_i.min().item():.4f}, max={pi_i.max().item():.4f}")
+            print(f"  Weighted CE: {weighted_ce.item():.4f}, Mean KL: {mean_kl.item():.4f}")
+            print(f"  Inference grad norm: {grad_norm:.4f}")
+            print(f"  Total loss: {total_loss_batch.item():.4f}, CE loss: {weighted_ce.item():.4f}, KL loss: {mean_kl.item():.4f}")
+        # ------------------------------
+
+    avg_loss = total_loss / total_seen
+    avg_ce_loss = total_ce / total_seen
+    avg_kl_loss = total_kl / total_seen
+    train_acc = total_correct / total_seen
+    return avg_loss, avg_ce_loss, avg_kl_loss, train_acc
