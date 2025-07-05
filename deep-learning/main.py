@@ -14,8 +14,7 @@ import utils
 
 from models.lenet import LeNet
 from models.resnet import ResNet18, ResNet34
-from torchvision.models import ResNet50_Weights
-from torchvision.models import resnet50
+from torchvision.models import resnet18, ResNet18_Weights
 from torchvision import transforms
 # models with dropout for USDNL algorithm:
 from models.lenet import LeNetDO
@@ -54,6 +53,12 @@ parser.add_argument('--debug', action='store_true',
 
 args = parser.parse_args()
 
+#Tensorboard logging (for RLVI and ARLVI)
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
+log_dir = f"runs/{args.method}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+writer = SummaryWriter(log_dir=log_dir)
+
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
@@ -76,7 +81,7 @@ if args.dataset == 'mnist':
     input_channel = 1
     num_classes = 10
     args.n_epoch = 100
-    args.batch_size = 32
+    args.batch_size = 64
     args.wd = 1e-3
     args.lr_init = 0.01
 
@@ -193,8 +198,8 @@ if args.dataset == 'cifar100':
 if args.dataset == 'food101':
     input_channel = 3
     num_classes = 101
-    args.n_epoch = 100
-    args.batch_size = 64
+    args.n_epoch = 20 #smaller number for testing purposes
+    args.batch_size = 64 #was 32, perhaps faster with 64
     args.lr_init = 0.001
     if args.wd is None:
         args.wd = 1e-4
@@ -304,9 +309,8 @@ def run():
 
     # Prepare models and optimizers
     if args.dataset == 'food101' and args.method == 'arlvi':
-        #backbone = full resnet model (pretrained on Imagenet) before we split it 
-        backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
-        # Replace the final FC layer to match Food101 (101 classes)
+        # Load pretrained ResNet18
+        backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes)
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
@@ -363,7 +367,7 @@ def run():
  
     #initialize inference network for ARLVI
     # Feature dimension is the output of ResNet’s penultimate layer
-    feature_dim = model.classifier.in_features # should be 2048 for ResNet50
+    feature_dim = model.classifier.in_features # should be 512 for ResNet18
     inference_net = InferenceNet(feature_dim).to(DEVICE)
     optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_init)
 
@@ -380,23 +384,49 @@ def run():
             val_acc = utils.evaluate(val_loader, model)
 
         elif args.method == "rlvi":
+            start_time = time.time()
             train_acc, threshold = methods.train_rlvi(
                 train_loader, model, optimizer,
                 residuals, sample_weights, overfit, threshold
             )
-        elif args.method == "arlvi":
-            train_loss, train_acc = methods.train_arlvi(
-                model_features=model_features,
-                model_classifier=model_classifier,
-                inference_net=inference_net,
-                dataloader=train_loader,
-                optimizer=optimizer,
-                inference_optimizer=optimizer_inf,
-                device=DEVICE,
-                epoch=epoch,
-                lambda_kl=args.lambda_kl
-            )
+            epoch_time = time.time() - start_time
+            val_acc = utils.evaluate(val_loader, model)
+            test_acc = utils.evaluate(test_loader, model)
+            # --- Log RLVI metrics ---
+            writer.add_scalar("Loss/Total", train_loss, epoch)
+            writer.add_scalar("Epoch/Time", epoch_time, epoch)
+            writer.add_scalar("Train/Accuracy", train_acc, epoch)
+            writer.add_scalar("Validation/Accuracy", val_acc, epoch)
+            if args.dataset != "food101":
+                writer.add_scalar("Test/Accuracy", test_acc, epoch)
 
+            
+        elif args.method == "arlvi":
+            # --- Train ARLVI ---
+            start_time = time.time()
+            train_loss, train_acc, ce_loss, kl_loss = methods.train_arlvi(
+            model_features=model_features,
+            model_classifier=model_classifier,
+            inference_net=inference_net,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            inference_optimizer=optimizer_inf,
+            device=DEVICE,
+            epoch=epoch,
+            lambda_kl=args.lambda_kl,
+            writer=writer
+            )
+            epoch_time = time.time() - start_time
+            # --- Log metrics ---
+            writer.add_scalar("Train/Accuracy", train_acc, epoch)
+            writer.add_scalar("Loss/Total", train_loss, epoch)
+            writer.add_scalar("Loss/CE", ce_loss, epoch)
+            writer.add_scalar("Loss/KL", kl_loss, epoch)
+            writer.add_scalar("Epoch/Time", epoch_time, epoch)
+            writer.add_scalar("Validation/Accuracy", val_acc, epoch)
+            # Skip this line if dataset is Food101:
+            if args.dataset != "food101":
+                writer.add_scalar("Test/Accuracy", test_acc, epoch)
 
 
             # Check if overfitting has started
@@ -469,6 +499,9 @@ def run():
             myfile.write(f"{int(epoch)}:\t{time_ep:.2f}\t{threshold:.2f}\t{overfit}\t"
                          + f"{clean*100:.2f}\t{corr*100:.2f}\t"
                          + f"{train_acc:8.4f}\t{val_acc:8.4f}\t{test_acc:8.4f}\n")
+    
+#To close the TensorBoard writer
+writer.close()
 
 
 if __name__ == '__main__':
