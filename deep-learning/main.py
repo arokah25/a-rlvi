@@ -75,7 +75,7 @@ if DEVICE == "cuda":
 
 
 
-# Load datasets for training, validation, and testing
+"""# Load datasets for training, validation, and testing
 if args.dataset == 'mnist':
     input_channel = 1
     num_classes = 10
@@ -192,7 +192,7 @@ if args.dataset == 'cifar100':
 
     test_dataset = data_load.Cifar100Test(root=args.root_dir, 
                                             transform=Model.transform_test, 
-                                            target_transform=data_tools.transform_target)
+                                            target_transform=data_tools.transform_target)"""
 # For Food101 dataset (for arlvi training):
 if args.dataset == 'food101':
     input_channel = 3
@@ -416,6 +416,7 @@ def run():
             writer=writer
             )
             epoch_time = time.time() - start_time
+            val_acc = utils.evaluate(val_loader, model)
             # --- Log metrics ---
             writer.add_scalar("Train/Accuracy", train_acc, epoch)
             writer.add_scalar("Loss/Total", train_loss, epoch)
@@ -429,7 +430,6 @@ def run():
 
 
             # Check if overfitting has started
-            val_acc = utils.evaluate(val_loader, model)
             if not overfit:
                 if epoch > 2:
                     # Overfitting started <=> validation score is dropping
