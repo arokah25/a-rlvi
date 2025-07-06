@@ -1,6 +1,6 @@
 import os
 import argparse
-import datetime
+from datetime import datetime
 import time
 
 import numpy as np
@@ -55,7 +55,6 @@ args = parser.parse_args()
 
 #Tensorboard logging (for RLVI and ARLVI)
 from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
 log_dir = f"runs/{args.method}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 writer = SummaryWriter(log_dir=log_dir)
 
