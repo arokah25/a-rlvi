@@ -21,7 +21,9 @@ def train_arlvi(
     epoch: int,
     lambda_kl: float = 1.0,
     pi_bar: float = 0.5,
-):
+    writer=None
+    ):
+
     model_features.train()
     model_classifier.train()
     inference_net.train()
@@ -31,6 +33,10 @@ def train_arlvi(
     total_loss = 0.0
     total_ce = 0.0
     total_kl = 0.0
+
+    if writer is not None:
+        writer.add_scalar("Loss/train", train_loss, epoch)
+
 
     for batch_idx, (images, labels, _) in enumerate(dataloader):
         images = images.to(device)
