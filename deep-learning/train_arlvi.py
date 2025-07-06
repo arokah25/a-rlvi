@@ -21,7 +21,9 @@ def train_arlvi(
     epoch: int,
     lambda_kl: float = 1.0,
     pi_bar: float = 0.5,
-):
+    writer=None
+    ):
+
     model_features.train()
     model_classifier.train()
     inference_net.train()
@@ -31,6 +33,7 @@ def train_arlvi(
     total_loss = 0.0
     total_ce = 0.0
     total_kl = 0.0
+
 
     for batch_idx, (images, labels, _) in enumerate(dataloader):
         images = images.to(device)
@@ -92,4 +95,11 @@ def train_arlvi(
     avg_ce_loss = total_ce / total_seen
     avg_kl_loss = total_kl / total_seen
     train_acc = total_correct / total_seen
+
+    if writer is not None:
+        writer.add_scalar("Loss/Total", avg_loss, epoch)
+        writer.add_scalar("Loss/CE", avg_ce_loss, epoch)
+        writer.add_scalar("Loss/KL", avg_kl_loss, epoch)
+        writer.add_scalar("Train/Accuracy", train_acc, epoch)
+
     return avg_loss, avg_ce_loss, avg_kl_loss, train_acc
