@@ -265,7 +265,7 @@ if not os.path.exists(os.path.dirname(txtfile)):
     os.makedirs(os.path.dirname(txtfile))
 
 if os.path.exists(txtfile):
-    curr_time = datetime.datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
+    curr_time = datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
     new_dest = f"{txtfile}.bak-{curr_time}"
     os.system(f"mv {txtfile} {new_dest}")
 
