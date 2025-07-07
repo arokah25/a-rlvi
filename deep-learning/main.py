@@ -1,4 +1,3 @@
-#imports
 import os
 import argparse
 from datetime import datetime
@@ -429,7 +428,7 @@ def run():
             writer.add_scalar("Loss/CE", ce_loss, epoch)
             writer.add_scalar("Loss/KL", kl_loss, epoch)
             writer.add_scalar("Train/Accuracy", train_acc, epoch)
-            writer.add_scalar("Inference/MeanPi", inference_net.pi_i.mean().item(), epoch)
+            writer.add_scalar("Inference/MeanPi", mean_pi_i, epoch)
             writer.add_scalar("Test/Accuracy", val_acc, epoch)  # assuming val_loader is your test set
             writer.add_scalar("Epoch/Time", epoch_time, epoch)
 
