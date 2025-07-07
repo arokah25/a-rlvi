@@ -15,6 +15,7 @@ import utils
 from models.lenet import LeNet
 from models.resnet import ResNet18, ResNet34
 from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet50, ResNet50_Weights
 from torchvision import transforms
 # models with dropout for USDNL algorithm:
 from models.lenet import LeNetDO
@@ -194,12 +195,12 @@ if args.dataset == 'cifar100':
     test_dataset = data_load.Cifar100Test(root=args.root_dir, 
                                             transform=Model.transform_test, 
                                             target_transform=data_tools.transform_target)"""
-# For Food101 dataset (for arlvi training):
+# For Food101 dataset (for arlvi and rlvi training):
 if args.dataset == 'food101':
     input_channel = 3
     num_classes = 101
-    args.n_epoch = 20 #smaller number for testing purposes
-    args.batch_size = 64 #was 32, perhaps faster with 64
+    args.n_epoch = 10 #smaller number for testing purposes -- change to 80 later
+    args.batch_size = 32 
     args.lr_init = 0.001
     if args.wd is None:
         args.wd = 1e-4
@@ -309,8 +310,9 @@ def run():
 
     # Prepare models and optimizers
     if args.dataset == 'food101' and args.method == 'arlvi':
-        # Load pretrained ResNet18
+        # Load pretrained ResNet50 (resnet18 for faster training during testing)
         backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
+        #backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
         backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes)
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
