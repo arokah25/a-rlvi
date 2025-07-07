@@ -33,9 +33,10 @@ parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, coteachin
 #for ARLVI
 parser.add_argument('--lambda_kl', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term')
+parser.add_argument('--warmup_epochs', type=int, default=2,
+                    help='Number of warm-up epochs where π̄ is fixed (default: 2)')
+
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
-
-
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.45)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
 parser.add_argument('--split_percentage', type=float, help='train and validation', default=0.9)
@@ -384,10 +385,13 @@ def run():
 
         elif args.method == "rlvi":
             start_time = time.time()
-            train_acc, threshold = methods.train_rlvi(
-                train_loader, model, optimizer,
-                residuals, sample_weights, overfit, threshold
+            # --- Train RLVI ---
+            train_acc, threshold, train_loss = methods.train_rlvi(
+            train_loader, model, optimizer,
+            residuals, sample_weights, overfit, threshold,
+            writer=writer, epoch=epoch
             )
+
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             test_acc = utils.evaluate(test_loader, model)
@@ -395,7 +399,7 @@ def run():
             writer.add_scalar("Loss/Total", train_loss, epoch)
             writer.add_scalar("Epoch/Time", epoch_time, epoch)
             writer.add_scalar("Train/Accuracy", train_acc, epoch)
-            writer.add_scalar("Validation/Accuracy", val_acc, epoch)
+            writer.add_scalar("Test/Accuracy", val_acc, epoch)
             if args.dataset != "food101":
                 writer.add_scalar("Test/Accuracy", test_acc, epoch)
 
@@ -403,7 +407,7 @@ def run():
         elif args.method == "arlvi":
             # --- Train ARLVI ---
             start_time = time.time()
-            train_loss, train_acc, ce_loss, kl_loss = methods.train_arlvi(
+            ce_loss, kl_loss, train_acc = methods.train_arlvi(
             model_features=model_features,
             model_classifier=model_classifier,
             inference_net=inference_net,
@@ -413,17 +417,19 @@ def run():
             device=DEVICE,
             epoch=epoch,
             lambda_kl=args.lambda_kl,
+            warmup_epochs=args.warmup_epochs,
             writer=writer
             )
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             # --- Log metrics ---
-            writer.add_scalar("Train/Accuracy", train_acc, epoch)
-            writer.add_scalar("Loss/Total", train_loss, epoch)
             writer.add_scalar("Loss/CE", ce_loss, epoch)
             writer.add_scalar("Loss/KL", kl_loss, epoch)
+            writer.add_scalar("Train/Accuracy", train_acc, epoch)
+            writer.add_scalar("Inference/MeanPi", inference_net.pi_i.mean().item(), epoch)
+            writer.add_scalar("Test/Accuracy", val_acc, epoch)  # assuming val_loader is your test set
             writer.add_scalar("Epoch/Time", epoch_time, epoch)
-            writer.add_scalar("Validation/Accuracy", val_acc, epoch)
+
             # Skip this line if dataset is Food101:
             if args.dataset != "food101":
                 writer.add_scalar("Test/Accuracy", test_acc, epoch)
