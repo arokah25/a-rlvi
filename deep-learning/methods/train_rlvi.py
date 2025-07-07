@@ -50,7 +50,8 @@ def false_negative_criterion(weights, alpha=0.05):
 
 
 def train_rlvi(train_loader, model, optimizer,
-               residuals, weights, overfit, threshold):
+               residuals, weights, overfit, threshold, 
+               writer=None, epoch=None):
     """
     Train one epoch: apply SGD updates using Bernoulli probabilities. 
     Thus, optimize variational bound of the marginal likelihood 
@@ -110,4 +111,11 @@ def train_rlvi(train_loader, model, optimizer,
 
     train_acc = float(train_correct) / float(train_total)
     avg_loss = total_loss / total_seen
+
+        # Log to TensorBoard if writer is provided
+    if writer is not None and epoch is not None:
+        writer.add_scalar("Loss/CE", avg_loss, epoch)
+        writer.add_scalar("Train/Accuracy", train_acc, epoch)
+        writer.add_scalar("Inference/MeanPi", weights.mean().item(), epoch)
+
     return train_acc, threshold, avg_loss
