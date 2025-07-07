@@ -11,8 +11,8 @@ def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: float) -> torch.Tensor:
 
 
 def train_arlvi(
-    model_features: torch.nn.Module,
-    model_classifier: torch.nn.Module,
+    model_features: torch.nn.Module,  # feature extractor, e.g., ResNet50
+    model_classifier: torch.nn.Module,  # classifier, e.g., MLP on top of features
     inference_net: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
     optimizer: torch.optim.Optimizer,
@@ -22,7 +22,7 @@ def train_arlvi(
     lambda_kl: float = 1.0,
     pi_bar: float = 0.5,
     writer=None
-    ):
+):
 
     model_features.train()
     model_classifier.train()
@@ -33,7 +33,7 @@ def train_arlvi(
     total_loss = 0.0
     total_ce = 0.0
     total_kl = 0.0
-
+    all_pi_values = []  # collect πᵢ across batches for histogram
 
     for batch_idx, (images, labels, _) in enumerate(dataloader):
         images = images.to(device)
@@ -49,17 +49,22 @@ def train_arlvi(
 
         # Step 3: Compute πᵢ
         pi_i = inference_net(z_i).clamp(1e-6, 1 - 1e-6)  # [B]
+        all_pi_values.append(pi_i.detach().cpu())        # accumulate for histogram
 
         # Step 4: Per-sample cross-entropy
         ce_loss = F.cross_entropy(logits, labels, reduction='none')  # [B]
 
         # Step 5: KL divergence
-        kl_loss = compute_kl_divergence(pi_i, pi_bar)                # [B]
+        if epoch < 2:  # Warm-up phase (for training stability)
+            kl_loss = compute_kl_divergence(pi_i, pi_bar)  # scalar prior (default = 0.9)
+        else:  # Use empirical prior from πᵢ in the current batch (true variational inference)
+            pi_bar_empirical = pi_i.detach().mean()
+            kl_loss = compute_kl_divergence(pi_i, pi_bar_empirical)  # [B]
 
         # Step 6: Total loss
-        weighted_ce = (pi_i * ce_loss).mean()                        # scalar
-        mean_kl = kl_loss.mean()                                     # scalar
-        total_loss_batch = weighted_ce + lambda_kl * mean_kl         # scalar
+        weighted_ce = (pi_i * ce_loss).mean()              # scalar
+        mean_kl = kl_loss.mean()                           # scalar
+        total_loss_batch = weighted_ce + lambda_kl * mean_kl  # scalar
 
         # Backward + optimize
         optimizer.zero_grad()
@@ -77,7 +82,7 @@ def train_arlvi(
         total_seen += batch_size
 
         # -------- DEBUG LOGGING --------
-        if batch_idx % 100 == 0:
+        if batch_idx % 500 == 0:
             grad_norm = 0.0
             for param in inference_net.parameters():
                 if param.grad is not None:
@@ -95,11 +100,17 @@ def train_arlvi(
     avg_ce_loss = total_ce / total_seen
     avg_kl_loss = total_kl / total_seen
     train_acc = total_correct / total_seen
+    mean_pi_i = torch.cat(all_pi_values, dim=0).mean().item()
 
     if writer is not None:
-        writer.add_scalar("Loss/Total", avg_loss, epoch)
         writer.add_scalar("Loss/CE", avg_ce_loss, epoch)
         writer.add_scalar("Loss/KL", avg_kl_loss, epoch)
         writer.add_scalar("Train/Accuracy", train_acc, epoch)
+        writer.add_scalar("Inference/MeanPi", mean_pi_i, epoch)
 
-    return avg_loss, avg_ce_loss, avg_kl_loss, train_acc
+        # Log πᵢ histogram every 10 epochs
+        if epoch % 10 == 0:
+            pi_concat = torch.cat(all_pi_values, dim=0)  # [N]
+            writer.add_histogram("Inference/PiDistribution", pi_concat, epoch)
+
+    return avg_ce_loss, avg_kl_loss, train_acc
