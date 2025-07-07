@@ -21,8 +21,9 @@ def train_arlvi(
     epoch: int,
     lambda_kl: float = 1.0,
     pi_bar: float = 0.5,
+    warmup_epochs: int = 2,
     writer=None
-):
+    ):
 
     model_features.train()
     model_classifier.train()
@@ -55,7 +56,7 @@ def train_arlvi(
         ce_loss = F.cross_entropy(logits, labels, reduction='none')  # [B]
 
         # Step 5: KL divergence
-        if epoch < 2:  # Warm-up phase (for training stability)
+        if epoch < warmup_epochs:  # Warm-up phase (for training stability)
             kl_loss = compute_kl_divergence(pi_i, pi_bar)  # scalar prior (default = 0.9)
         else:  # Use empirical prior from πᵢ in the current batch (true variational inference)
             pi_bar_empirical = pi_i.detach().mean()
