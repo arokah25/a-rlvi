@@ -38,7 +38,7 @@ parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
-parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.45)
+parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.9)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
 parser.add_argument('--split_percentage', type=float, help='train and validation', default=0.9)
 parser.add_argument('--momentum', type=int, help='momentum', default=0.9)
@@ -423,6 +423,7 @@ def run():
             epoch=epoch,
             lambda_kl=args.lambda_kl,
             warmup_epochs=args.warmup_epochs,
+            pi_bar=args.noise_rate,  # Use noise_rate as pi_bar for warm-up
             writer=writer
             )
             epoch_time = time.time() - start_time
