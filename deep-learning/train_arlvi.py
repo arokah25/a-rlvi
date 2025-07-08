@@ -20,7 +20,7 @@ def train_arlvi(
     device: torch.device,
     epoch: int,
     lambda_kl: float = 1.0,
-    pi_bar: float = 0.5,
+    pi_bar: float = 0.45,
     warmup_epochs: int = 2,
     writer=None
     ):
@@ -114,4 +114,4 @@ def train_arlvi(
             pi_concat = torch.cat(all_pi_values, dim=0)  # [N]
             writer.add_histogram("Inference/PiDistribution", pi_concat, epoch)
 
-    return avg_ce_loss, avg_kl_loss, train_acc
+    return avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i
