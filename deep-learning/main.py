@@ -291,14 +291,16 @@ def run():
                                                num_workers=args.num_workers,
                                                drop_last=False,
                                                shuffle=True,
-                                               pin_memory=True)
+                                               pin_memory=True,
+                                               prefetch_factor=4)
     
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
                                             batch_size=args.batch_size,
                                             num_workers=args.num_workers,
                                             drop_last=False,
                                             shuffle=False,
-                                            pin_memory=True)
+                                            pin_memory=True,
+                                            prefetch_factor=4)
 
     
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
@@ -306,7 +308,8 @@ def run():
                                               num_workers=args.num_workers,
                                               drop_last=False,
                                               shuffle=False,
-                                              pin_memory=True)
+                                              pin_memory=True,
+                                              prefetch_factor=4)
 
     # Prepare models and optimizers
     if args.dataset == 'food101' and args.method == 'arlvi':
