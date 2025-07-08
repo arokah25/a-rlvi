@@ -5,7 +5,7 @@ import torch.nn.functional as F
 def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: float) -> torch.Tensor:
     eps = 1e-6  # for numerical stability
     pi_i = pi_i.clamp(eps, 1 - eps)
-    pi_bar = torch.tensor(pi_bar, device=pi_i.device)
+    pi_bar = torch.full_like(pi_i, fill_value=pi_bar)
     kl = pi_i * torch.log(pi_i / pi_bar) + (1 - pi_i) * torch.log((1 - pi_i) / (1 - pi_bar))
     return kl
 
