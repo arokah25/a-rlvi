@@ -2,10 +2,10 @@ import torch
 import torch.nn.functional as F
 
 
-def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: float) -> torch.Tensor:
+def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: torch.Tensor) -> torch.Tensor:
     eps = 1e-6  # for numerical stability
     pi_i = pi_i.clamp(eps, 1 - eps)
-    pi_bar = torch.full_like(pi_i, fill_value=pi_bar)
+    pi_bar = pi_bar.clamp(eps, 1 - eps)
     kl = pi_i * torch.log(pi_i / pi_bar) + (1 - pi_i) * torch.log((1 - pi_i) / (1 - pi_bar))
     return kl
 
@@ -20,7 +20,7 @@ def train_arlvi(
     device: torch.device,
     epoch: int,
     lambda_kl: float = 1.0,
-    pi_bar: float = 0.5,
+    pi_bar: float = 0.45,
     warmup_epochs: int = 2,
     writer=None
     ):
@@ -57,10 +57,12 @@ def train_arlvi(
 
         # Step 5: KL divergence
         if epoch < warmup_epochs:  # Warm-up phase (for training stability)
-            kl_loss = compute_kl_divergence(pi_i, pi_bar)  # scalar prior (default = 0.9)
+            pi_bar_tensor = torch.full_like(pi_i, pi_bar)
+            kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
         else:  # Use empirical prior from πᵢ in the current batch (true variational inference)
             pi_bar_empirical = pi_i.detach().mean()
-            kl_loss = compute_kl_divergence(pi_i, pi_bar_empirical)  # [B]
+            pi_bar_tensor = torch.full_like(pi_i, pi_bar_empirical)
+            kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
 
         # Step 6: Total loss
         weighted_ce = (pi_i * ce_loss).mean()              # scalar
