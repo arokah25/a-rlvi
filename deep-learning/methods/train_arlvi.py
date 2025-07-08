@@ -20,7 +20,7 @@ def train_arlvi(
     device: torch.device,
     epoch: int,
     lambda_kl: float = 1.0,
-    pi_bar: float = 0.45,
+    pi_bar: float = 0.9,  # "warm up" prior belief that a sample is clean
     warmup_epochs: int = 2,
     writer=None
     ):
@@ -49,7 +49,7 @@ def train_arlvi(
         logits = model_classifier(z_i)        # [B, num_classes]
 
         # Step 3: Compute πᵢ
-        pi_i = inference_net(z_i).clamp(1e-6, 1 - 1e-6)  # [B]
+        pi_i = inference_net(z_i).clamp(0.05, 0.95)  # [B] --- # clamp for stability and prevent collapse
         all_pi_values.append(pi_i.detach().cpu())        # accumulate for histogram
 
         # Step 4: Per-sample cross-entropy
