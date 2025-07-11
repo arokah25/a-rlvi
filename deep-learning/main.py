@@ -36,6 +36,7 @@ parser.add_argument('--lambda_kl', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term')
 parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
+parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.9)
@@ -427,6 +428,7 @@ def run():
             lambda_kl=args.lambda_kl,
             warmup_epochs=args.warmup_epochs,
             pi_bar=args.noise_rate,  # Use noise_rate as pi_bar for warm-up
+            alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             writer=writer
             )
