@@ -22,7 +22,7 @@ def train_arlvi(
     lambda_kl: float = 1.0,
     pi_bar: float = 0.9,  # "warm up" prior belief that a sample is clean
     warmup_epochs: int = 2,
-    alpha: float = 0.9, # used for computing empirical prior from pi_i (EMA)
+    alpha: float = 0.95, # used for computing empirical prior from pi_i (EMA)
     pi_bar_ema: float = 0.9,  # initial value for empirical prior
     # TensorBoard writer for logging
     writer=None
