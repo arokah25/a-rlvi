@@ -2,11 +2,10 @@ import torch
 import torch.nn.functional as F
 
 
-def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: float) -> torch.Tensor:
+def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: torch.Tensor) -> torch.Tensor:
     eps = 1e-6  # for numerical stability
-    #pi_i = pi_i.clamp(eps, 1 - eps)
-    pi_i = pi_i.clamp(0.05, 0.95)  # clamp to avoid training instability issues
-    pi_bar = torch.full_like(pi_i, fill_value=pi_bar)
+    pi_i = pi_i.clamp(eps, 1 - eps)
+    pi_bar = pi_bar.clamp(eps, 1 - eps)
     kl = pi_i * torch.log(pi_i / pi_bar) + (1 - pi_i) * torch.log((1 - pi_i) / (1 - pi_bar))
     return kl
 
@@ -21,8 +20,11 @@ def train_arlvi(
     device: torch.device,
     epoch: int,
     lambda_kl: float = 1.0,
-    pi_bar: float = 0.45,
+    pi_bar: float = 0.9,  # "warm up" prior belief that a sample is clean
     warmup_epochs: int = 2,
+    alpha: float = 0.95, # used for computing empirical prior from pi_i (EMA)
+    pi_bar_ema: float = 0.9,  # initial value for empirical prior
+    # TensorBoard writer for logging
     writer=None
     ):
 
@@ -50,7 +52,7 @@ def train_arlvi(
         logits = model_classifier(z_i)        # [B, num_classes]
 
         # Step 3: Compute πᵢ
-        pi_i = inference_net(z_i).clamp(1e-6, 1 - 1e-6)  # [B]
+        pi_i = inference_net(z_i).clamp(0.05, 0.95)  # [B] clamp for stability
         all_pi_values.append(pi_i.detach().cpu())        # accumulate for histogram
 
         # Step 4: Per-sample cross-entropy
@@ -58,10 +60,13 @@ def train_arlvi(
 
         # Step 5: KL divergence
         if epoch < warmup_epochs:  # Warm-up phase (for training stability)
-            kl_loss = compute_kl_divergence(pi_i, pi_bar)  # scalar prior (default = 0.9)
+            pi_bar_tensor = torch.full_like(pi_i, pi_bar)
+            kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
         else:  # Use empirical prior from πᵢ in the current batch (true variational inference)
-            pi_bar_empirical = pi_i.detach().mean()
-            kl_loss = compute_kl_divergence(pi_i, pi_bar_empirical)  # [B]
+            # Update EMA prior
+            pi_bar_ema = alpha * pi_bar_ema + (1 - alpha) * pi_i.mean().item()
+            pi_bar_tensor = torch.full_like(pi_i, pi_bar_ema)
+            kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
 
         # Step 6: Total loss
         weighted_ce = (pi_i * ce_loss).mean()              # scalar
@@ -104,15 +109,9 @@ def train_arlvi(
     train_acc = total_correct / total_seen
     mean_pi_i = torch.cat(all_pi_values, dim=0).mean().item()
 
-    if writer is not None:
-        writer.add_scalar("Loss/CE", avg_ce_loss, epoch)
-        writer.add_scalar("Loss/KL", avg_kl_loss, epoch)
-        writer.add_scalar("Train/Accuracy", train_acc, epoch)
-        writer.add_scalar("Inference/MeanPi", mean_pi_i, epoch)
+    # Log πᵢ histogram every 10 epochs
+    if epoch % 10 == 0 and writer is not None:
+        pi_concat = torch.cat(all_pi_values, dim=0)  # [N]
+        writer.add_histogram("Inference/PiDistribution", pi_concat, epoch)
 
-        # Log πᵢ histogram every 10 epochs
-        if epoch % 10 == 0:
-            pi_concat = torch.cat(all_pi_values, dim=0)  # [N]
-            writer.add_histogram("Inference/PiDistribution", pi_concat, epoch)
-
-    return avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i
+    return avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i, pi_bar_ema
