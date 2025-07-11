@@ -285,6 +285,8 @@ class CombinedModel(torch.nn.Module):
 
 def run():
     train_acc = 0.0
+    val_acc = 0.0
+    test_acc = 0.0
     # Data Loaders
     train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
                                                batch_size=args.batch_size,
@@ -377,6 +379,7 @@ def run():
     optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_init)
 
     # Training
+    pi_bar_ema = 0.9  # initialize empirical prior for ARLVI (exponential moving average)
     for epoch in range(1, args.n_epoch):
         model.train()
 
@@ -412,7 +415,7 @@ def run():
         elif args.method == "arlvi":
             # --- Train ARLVI ---
             start_time = time.time()
-            ce_loss, kl_loss, train_acc, mean_pi_i = methods.train_arlvi(
+            ce_loss, kl_loss, train_acc, mean_pi_i, pi_bar_ema = methods.train_arlvi(
             model_features=model_features,
             model_classifier=model_classifier,
             inference_net=inference_net,
@@ -424,6 +427,7 @@ def run():
             lambda_kl=args.lambda_kl,
             warmup_epochs=args.warmup_epochs,
             pi_bar=args.noise_rate,  # Use noise_rate as pi_bar for warm-up
+            pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             writer=writer
             )
             epoch_time = time.time() - start_time
@@ -435,6 +439,7 @@ def run():
             writer.add_scalar("Inference/MeanPi", mean_pi_i, epoch)
             writer.add_scalar("Test/Accuracy", val_acc, epoch)  # assuming val_loader is your test set
             writer.add_scalar("Epoch/Time", epoch_time, epoch)
+            writer.add_scalar("Inference/pi_bar_ema", pi_bar_ema, epoch)
 
             # Skip this line if dataset is Food101:
             if args.dataset != "food101":
