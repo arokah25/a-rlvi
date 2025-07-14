@@ -25,6 +25,7 @@ def train_arlvi(
     alpha: float = 0.95, # used for computing empirical prior from pi_i (EMA)
     pi_bar_ema: float = 0.9,  # initial value for empirical prior
     # TensorBoard writer for logging
+    beta: float = 0.01, # weight on entropy regularization
     writer=None
     ):
 
@@ -38,6 +39,7 @@ def train_arlvi(
     total_ce = 0.0
     total_kl = 0.0
     all_pi_values = []  # collect πᵢ across batches for histogram
+    eps = 1e-6  # for numerical stability
 
     for batch_idx, (images, labels, _) in enumerate(dataloader):
         images = images.to(device)
@@ -45,8 +47,8 @@ def train_arlvi(
         batch_size = images.size(0)
 
         # Step 1: Forward pass through feature extractor
-        z_i = model_features(images)          # [B, 2048, 1, 1]
-        z_i = z_i.view(batch_size, -1)        # [B, 2048]
+        z_i = model_features(images)          # [B, 2048, 1, 1] - resnet50 features
+        z_i = z_i.view(batch_size, -1)        # [B, 2048] - flatten features
 
         # Step 2: Get logits
         logits = model_classifier(z_i)        # [B, num_classes]
@@ -68,10 +70,15 @@ def train_arlvi(
             pi_bar_tensor = torch.full_like(pi_i, pi_bar_ema)
             kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
 
-        # Step 6: Total loss
+        # Step 6: Entropy regularization to penalize overconfident πᵢ (push toward 0.5)
+        entropy_reg = -(pi_i * torch.log(pi_i + eps)) - ((1 - pi_i) * torch.log(1 - pi_i + eps))  # [B]
+        #beta = beta_init * (1 - epoch / total_epochs) # beta annealing
+        entropy_reg = beta * entropy_reg.mean()  # scalar
+
+        # Step 7: Total loss
         weighted_ce = (pi_i * ce_loss).mean()              # scalar
         mean_kl = kl_loss.mean()                           # scalar
-        total_loss_batch = weighted_ce + lambda_kl * mean_kl  # scalar
+        total_loss_batch = weighted_ce + lambda_kl * mean_kl + entropy_reg  # scalar
 
         # Backward + optimize
         optimizer.zero_grad()
@@ -100,7 +107,9 @@ def train_arlvi(
             print(f"  πᵢ stats: mean={pi_i.mean().item():.4f}, min={pi_i.min().item():.4f}, max={pi_i.max().item():.4f}")
             print(f"  Weighted CE: {weighted_ce.item():.4f}, Mean KL: {mean_kl.item():.4f}")
             print(f"  Inference grad norm: {grad_norm:.4f}")
+            print(f"  Entropy Reg loss: {entropy_reg.item():.4f}")
             print(f"  Total loss: {total_loss_batch.item():.4f}, CE loss: {weighted_ce.item():.4f}, KL loss: {mean_kl.item():.4f}")
+            
         # ------------------------------
 
     avg_loss = total_loss / total_seen
