@@ -31,12 +31,18 @@ parser.add_argument('--result_dir', type=str, help = 'dir to save result txt fil
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
 parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
-#for ARLVI
+
+###---for A-RLVI stabilization---###
 parser.add_argument('--lambda_kl', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term')
 parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
+parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.01)
+parser.add_argument('--lr_inference', type=float, default=1e-3, help='Learning rate for the inference network (Adam)')
+parser.add_argument('--lr_init', type=float, default=0.01,
+                    help='Initial learning rate for model (used by SGD)')
+###---###
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.9)
@@ -202,7 +208,7 @@ if args.dataset == 'food101':
     num_classes = 101
     args.n_epoch = 10 #smaller number for testing purposes -- change to 80 later
     args.batch_size = 32 
-    args.lr_init = 0.001
+    #args.lr_init = 0.01
     if args.wd is None:
         args.wd = 1e-4
 
@@ -377,10 +383,10 @@ def run():
     # Feature dimension is the output of ResNet’s penultimate layer
     feature_dim = model.classifier.in_features # should be 512 for ResNet18
     inference_net = InferenceNet(feature_dim).to(DEVICE)
-    optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_init)
+    optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_inference)
 
     # Training
-    pi_bar_ema = 0.9  # initialize empirical prior for ARLVI (exponential moving average)
+    pi_bar_ema = args.noise_rate  # initialize empirical prior for ARLVI (exponential moving average)
     for epoch in range(1, args.n_epoch):
         model.train()
 
@@ -430,6 +436,7 @@ def run():
             pi_bar=args.noise_rate,  # Use noise_rate as pi_bar for warm-up
             alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
+            beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
             writer=writer
             )
             epoch_time = time.time() - start_time
