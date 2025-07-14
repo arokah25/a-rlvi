@@ -25,7 +25,7 @@ def train_arlvi(
     alpha: float = 0.95, # used for computing empirical prior from pi_i (EMA)
     pi_bar_ema: float = 0.9,  # initial value for empirical prior
     # TensorBoard writer for logging
-    beta: float = 0.01, # weight on entropy regularization
+    beta: float = 0.05, # weight on entropy regularization
     writer=None
     ):
 
@@ -54,7 +54,7 @@ def train_arlvi(
         logits = model_classifier(z_i)        # [B, num_classes]
 
         # Step 3: Compute πᵢ
-        pi_i = inference_net(z_i).clamp(0.05, 0.95)  # [B] clamp for stability
+        pi_i = inference_net(z_i).clamp(eps, 1-eps)  # [B] clamp for stability
         all_pi_values.append(pi_i.detach().cpu())        # accumulate for histogram
 
         # Step 4: Per-sample cross-entropy
@@ -122,5 +122,6 @@ def train_arlvi(
     if epoch % 10 == 0 and writer is not None:
         pi_concat = torch.cat(all_pi_values, dim=0)  # [N]
         writer.add_histogram("Inference/PiDistribution", pi_concat, epoch)
-
+        writer.flush()
+        
     return avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i, pi_bar_ema
