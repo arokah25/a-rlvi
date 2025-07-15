@@ -56,7 +56,7 @@ def train_arlvi(
     epoch:               int,
     *,
     lambda_kl:     float = 1.0,   # weight for KL term
-    pi_bar:        float = 0.9,   # warm-up prior value
+    pi_bar:        float = 0.9,   # warm-up prior value 90% clean, 10% corrupt
     warmup_epochs: int   = 2,
     alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
     pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
@@ -117,8 +117,14 @@ def train_arlvi(
         logits = model_classifier(z_i)         # (B,num_classes)
 
         # ------------- posterior πᵢ  (soft squash) -------------------
-        pi_raw = inference_net(z_i)            # sigmoid inside net → (0,1)
-        pi_i   = 0.9 * pi_raw + 0.05           # (0.05,0.95) keeps grad alive
+        # During warm-up we **freeze φ** by disabling gradient tracking
+        if epoch < warmup_epochs:
+            with torch.no_grad():
+                pi_raw = inference_net(z_i)    # sigmoid inside net → (0,1)
+        else:
+            pi_raw = inference_net(z_i)
+
+        pi_i = 0.9 * pi_raw + 0.05            # (0.05,0.95) keeps grad alive
 
         all_pi_values.append(pi_i.detach().cpu())
 
@@ -141,15 +147,18 @@ def train_arlvi(
 
         # ------------- Back-prop ------------------------------------
         optimizer.zero_grad()
-        inference_optimizer.zero_grad()
+        if epoch >= warmup_epochs:
+            inference_optimizer.zero_grad()
+
         total_loss_batch.backward()
 
-        # gradient clip for inference net (helps when π collapses)
-        if grad_clip is not None:
-            torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
-
-        optimizer.step()
-        inference_optimizer.step()
+        if epoch >= warmup_epochs:
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
+            optimizer.step()             # θ update
+            inference_optimizer.step()   # φ update
+        else:
+            optimizer.step()             # θ update only (φ frozen)
 
         # ------------- Stats ----------------------------------------
         total_loss += total_loss_batch.item() * B
