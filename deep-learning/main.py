@@ -47,9 +47,8 @@ parser.add_argument('--n_epoch', type=int, help='number of epochs for training',
 parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
-parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.9)
+parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.1)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
-parser.add_argument('--split_percentage', type=float, help='train and validation', default=0.9)
 parser.add_argument('--momentum', type=int, help='momentum', default=0.9)
 parser.add_argument('--print_freq', type=int, default=1)
 parser.add_argument('--num_workers', type=int, default=4, help='number of subprocesses for data loading')
@@ -438,7 +437,7 @@ def run():
             epoch=epoch,
             lambda_kl=args.lambda_kl,
             warmup_epochs=args.warmup_epochs,
-            pi_bar= 1.0 -args.noise_rate,  # Use noise_rate as pi_bar for warm-up
+            pi_bar= 1.0 -args.noise_rate,  # Use 1-noise_rate as pi_bar for warm-up
             alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
@@ -446,7 +445,7 @@ def run():
             )
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
-            print(f"VAL_ACC={val_acc:.4f}", flush=True)    # Optuna will parse this
+            print(f"VAL_ACC={val_acc:.4f}%", flush=True)    # Optuna will parse this
 
             # --- Log metrics ---
             writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
