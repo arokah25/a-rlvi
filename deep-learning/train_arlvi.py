@@ -1,117 +1,203 @@
+"""
+train_arlvi.py
+==============
+
+Mini-batch training loop for A-RLVI with practical-stability fixes:
+
+  1. Soft squashing of πᵢ ∈ (0.05,0.95) keeps gradients alive.
+  2. Weighted cross-entropy is **normalised by Σ πᵢ** to keep loss scale stable.
+  3. KL prior π̄ is detached from the graph (no gradient into the prior).
+  4. π̄ is updated by an EMA **once per epoch** – gives a true anchor.
+  5. Entropy regularisation is *subtracted* (encourages uncertainty).
+  6. Gradient clipping on the inference net.
+
+The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
+`main.py` can feed it into the next epoch.
+"""
+
 import torch
 import torch.nn.functional as F
 
 
+# ---------------------------------------------------------------------
+# Helper: KL( Bern(pi_i) || Bern(pi_bar) )  element-wise
+# ---------------------------------------------------------------------
 def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: torch.Tensor) -> torch.Tensor:
-    eps = 1e-6  # for numerical stability
-    pi_i = pi_i.clamp(eps, 1 - eps)
-    pi_bar = pi_bar.clamp(eps, 1 - eps)
-    kl = pi_i * torch.log(pi_i / pi_bar) + (1 - pi_i) * torch.log((1 - pi_i) / (1 - pi_bar))
+    """
+    Closed-form KL divergence between two Bernoulli distributions.
+
+    Args
+    ----
+    pi_i   : (B,)  posterior probabilities
+    pi_bar : (B,)  prior probabilities, same shape
+
+    Returns
+    -------
+    kl     : (B,)  KL divergences for each sample
+    """
+    eps = 1e-6
+    pi_i   = pi_i.clamp(eps, 1.0 - eps)
+    pi_bar = pi_bar.clamp(eps, 1.0 - eps)
+    kl = pi_i * torch.log(pi_i / pi_bar) + (1.0 - pi_i) * torch.log((1.0 - pi_i) / (1.0 - pi_bar))
     return kl
 
 
+# ---------------------------------------------------------------------
+# Main epoch routine
+# ---------------------------------------------------------------------
 def train_arlvi(
-    model_features: torch.nn.Module,  # feature extractor, e.g., ResNet50
-    model_classifier: torch.nn.Module,  # classifier, e.g., MLP on top of features
-    inference_net: torch.nn.Module,
-    dataloader: torch.utils.data.DataLoader,
-    optimizer: torch.optim.Optimizer,
-    inference_optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    epoch: int,
-    lambda_kl: float = 1.0,
-    pi_bar: float = 0.9,  # "warm up" prior belief that a sample is clean
-    warmup_epochs: int = 2,
-    alpha: float = 0.95, # used for computing empirical prior from pi_i (EMA)
-    pi_bar_ema: float = 0.9,  # initial value for empirical prior
-    # TensorBoard writer for logging
-    writer=None
-    ):
+    model_features:      torch.nn.Module,   # frozen / finetuned CNN backbone
+    model_classifier:    torch.nn.Module,   # classifier head
+    inference_net:       torch.nn.Module,   # amortised corruption network f_φ
+    dataloader:          torch.utils.data.DataLoader,
+    optimizer:           torch.optim.Optimizer,      # for θ (features+classifier)
+    inference_optimizer: torch.optim.Optimizer,      # for φ
+    device:              torch.device,
+    epoch:               int,
+    *,
+    lambda_kl:     float = 1.0,   # weight for KL term
+    pi_bar:        float = 0.9,   # warm-up prior value
+    warmup_epochs: int   = 2,
+    alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
+    pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
+    beta:          float = 0.1,   # weight on entropy regularisation
+    writer=None,                  # optional TensorBoard writer
+    grad_clip:     float = 5.0,   # clip on inference-net gradients (None = off)
+):
+    """
+    One training epoch of A-RLVI.
 
+    Returns
+    -------
+    avg_ce_loss : mean normalised CE over epoch
+    avg_kl_loss : mean KL over epoch
+    train_acc   : accuracy on training data
+    mean_pi_i   : mean posterior probability over epoch
+    pi_bar_ema  : updated EMA prior (to pass back to caller)
+    """
+
+    # -----------------------------------------------------------------
+    # Put models in train mode
+    # -----------------------------------------------------------------
     model_features.train()
     model_classifier.train()
     inference_net.train()
 
-    total_correct = 0
-    total_seen = 0
-    total_loss = 0.0
-    total_ce = 0.0
-    total_kl = 0.0
-    all_pi_values = []  # collect πᵢ across batches for histogram
+    # -----------------------------------------------------------------
+    # Running statistics
+    # -----------------------------------------------------------------
+    total_loss = total_ce = total_kl = 0.0
+    total_correct = total_seen = 0
+    all_pi_values = []        # used for histogram + epoch mean
 
-    for batch_idx, (images, labels, _) in enumerate(dataloader):
-        images = images.to(device)
-        labels = labels.to(device)
-        batch_size = images.size(0)
+    eps = 1e-8                # numerical safety for logs / div
 
-        # Step 1: Forward pass through feature extractor
-        z_i = model_features(images)          # [B, 2048, 1, 1]
-        z_i = z_i.view(batch_size, -1)        # [B, 2048]
+    # -----------------------------------------------------------------
+    # CONSTANT prior tensor for this epoch’s batches
+    #  - warm-up   : fixed optimistic prior (pi_bar)
+    #  - finetune  : detached tensor filled with π̄ₑₘₐ from last epoch
+    # -----------------------------------------------------------------
+    if epoch < warmup_epochs:
+        prior_value = torch.tensor(pi_bar, device=device)
+    else:
+        prior_value = torch.tensor(pi_bar_ema, device=device)
 
-        # Step 2: Get logits
-        logits = model_classifier(z_i)        # [B, num_classes]
+    # -----------------------------------------------------------------
+    # Mini-batch loop
+    # -----------------------------------------------------------------
+    for batch_idx, (images, labels, *_ ) in enumerate(dataloader):
+        # ------------- data to device --------------------------------
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        B = images.size(0)
 
-        # Step 3: Compute πᵢ
-        pi_i = inference_net(z_i).clamp(0.05, 0.95)  # [B] clamp for stability
-        all_pi_values.append(pi_i.detach().cpu())        # accumulate for histogram
+        # ------------- forward pass (θ) ------------------------------
+        z_i = model_features(images)           # (B,C,1,1)
+        z_i = z_i.view(B, -1)                  # flatten → (B,C)
+        logits = model_classifier(z_i)         # (B,num_classes)
 
-        # Step 4: Per-sample cross-entropy
-        ce_loss = F.cross_entropy(logits, labels, reduction='none')  # [B]
+        # ------------- posterior πᵢ  (soft squash) -------------------
+        pi_raw = inference_net(z_i)            # sigmoid inside net → (0,1)
+        pi_i   = 0.9 * pi_raw + 0.05           # (0.05,0.95) keeps grad alive
 
-        # Step 5: KL divergence
-        if epoch < warmup_epochs:  # Warm-up phase (for training stability)
-            pi_bar_tensor = torch.full_like(pi_i, pi_bar)
-            kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
-        else:  # Use empirical prior from πᵢ in the current batch (true variational inference)
-            # Update EMA prior
-            pi_bar_ema = alpha * pi_bar_ema + (1 - alpha) * pi_i.mean().item()
-            pi_bar_tensor = torch.full_like(pi_i, pi_bar_ema)
-            kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)  # [B]
+        all_pi_values.append(pi_i.detach().cpu())
 
-        # Step 6: Total loss
-        weighted_ce = (pi_i * ce_loss).mean()              # scalar
-        mean_kl = kl_loss.mean()                           # scalar
-        total_loss_batch = weighted_ce + lambda_kl * mean_kl  # scalar
+        # ------------- per-sample CE --------------------------------
+        ce_loss = F.cross_entropy(logits, labels, reduction='none')  # (B,)
 
-        # Backward + optimize
+        # ------------- KL divergence --------------------------------
+        pi_bar_tensor = torch.full_like(pi_i, prior_value).detach()  # no grad
+        kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)         # (B,)
+
+        # ------------- Entropy regularisation -----------------------
+        entropy = -(pi_i*torch.log(pi_i+eps) + (1-pi_i)*torch.log(1-pi_i+eps))
+        entropy_reg = beta * entropy.mean()          # subtract later
+
+        # ------------- Loss composition -----------------------------
+        ce_weighted = (pi_i * ce_loss).sum() / (pi_i.sum() + eps)
+        mean_kl     = kl_loss.mean()
+
+        total_loss_batch = ce_weighted + lambda_kl * mean_kl - entropy_reg
+
+        # ------------- Back-prop ------------------------------------
         optimizer.zero_grad()
         inference_optimizer.zero_grad()
         total_loss_batch.backward()
+
+        # gradient clip for inference net (helps when π collapses)
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
+
         optimizer.step()
         inference_optimizer.step()
 
-        # Stats
-        total_loss += total_loss_batch.item() * batch_size
-        total_ce += weighted_ce.item() * batch_size
-        total_kl += mean_kl.item() * batch_size
-        _, predicted = logits.max(1)
-        total_correct += predicted.eq(labels).sum().item()
-        total_seen += batch_size
+        # ------------- Stats ----------------------------------------
+        total_loss += total_loss_batch.item() * B
+        total_ce   += ce_weighted.item()      * B
+        total_kl   += mean_kl.item()          * B
+        total_seen += B
 
-        # -------- DEBUG LOGGING --------
+        preds = logits.argmax(dim=1)
+        total_correct += preds.eq(labels).sum().item()
+
+        # ---- debug every 500 batches -------------------------
         if batch_idx % 500 == 0:
-            grad_norm = 0.0
-            for param in inference_net.parameters():
-                if param.grad is not None:
-                    grad_norm += param.grad.norm().item() ** 2
-            grad_norm = grad_norm ** 0.5
+            # Measure grad norm WITHOUT a second clip
+            grad_inf = torch.nn.utils.clip_grad_norm_(
+                inference_net.parameters(), float('inf')
+            ).item()
 
-            print(f"[Epoch {epoch} | Batch {batch_idx}]")
-            print(f"  πᵢ stats: mean={pi_i.mean().item():.4f}, min={pi_i.min().item():.4f}, max={pi_i.max().item():.4f}")
-            print(f"  Weighted CE: {weighted_ce.item():.4f}, Mean KL: {mean_kl.item():.4f}")
-            print(f"  Inference grad norm: {grad_norm:.4f}")
-            print(f"  Total loss: {total_loss_batch.item():.4f}, CE loss: {weighted_ce.item():.4f}, KL loss: {mean_kl.item():.4f}")
-        # ------------------------------
+            print(f"[Epoch {epoch:02d} Batch {batch_idx:04d}] "
+                  f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
+                  f"CE={ce_weighted.item():.3f}  KL={mean_kl.item():.3f}  "
+                  f"|∇φ|={grad_inf:.2f}")
 
-    avg_loss = total_loss / total_seen
-    avg_ce_loss = total_ce / total_seen
-    avg_kl_loss = total_kl / total_seen
-    train_acc = total_correct / total_seen
-    mean_pi_i = torch.cat(all_pi_values, dim=0).mean().item()
+    # ---------------- end mini-batch loop ---------------------------
 
-    # Log πᵢ histogram every 10 epochs
-    if epoch % 10 == 0 and writer is not None:
-        pi_concat = torch.cat(all_pi_values, dim=0)  # [N]
-        writer.add_histogram("Inference/PiDistribution", pi_concat, epoch)
+    # -----------------------------------------------------------------
+    # Once-per-epoch EMA update of the prior
+    # -----------------------------------------------------------------
+    mean_pi_i = torch.cat(all_pi_values).mean().item()
+    if epoch >= warmup_epochs:
+        pi_bar_ema = alpha * pi_bar_ema + (1.0 - alpha) * mean_pi_i
 
+    # -----------------------------------------------------------------
+    # Aggregate epoch metrics
+    # -----------------------------------------------------------------
+    avg_loss    = total_loss / total_seen
+    avg_ce_loss = total_ce   / total_seen
+    avg_kl_loss = total_kl   / total_seen
+    train_acc   = total_correct / total_seen
+
+    # -------- TensorBoard logging ------------------------
+    if writer is not None:
+        writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
+        writer.add_scalar("Loss/KL",          avg_kl_loss, epoch)
+        writer.add_scalar("Inference/pi_bar_ema", pi_bar_ema, epoch)
+        if epoch % 10 == 0:
+            pi_hist = torch.cat(all_pi_values)
+            writer.add_histogram("Inference/PiDistribution", pi_hist, epoch)
+            writer.flush()
+
+    # -----------------------------------------------------------------
     return avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i, pi_bar_ema
