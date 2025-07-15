@@ -42,6 +42,7 @@ parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entr
 parser.add_argument('--lr_inference', type=float, default=1e-3, help='Learning rate for the inference network (Adam)')
 parser.add_argument('--lr_init', type=float, default=0.01,
                     help='Initial learning rate for model (used by SGD)')
+parser.add_argument('--split_percentage', type=float, default=0.1)
 ###---###
 parser.add_argument('--n_epoch', type=int, help='number of epochs for training', default=80)
 parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
