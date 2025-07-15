@@ -391,7 +391,7 @@ def run():
                                     lr=args.lr_inference, weight_decay=1e-4)
 
     # Training
-    pi_bar_ema = args.noise_rate  # initialize empirical prior for ARLVI (exponential moving average)
+    pi_bar_ema = 1.0 - args.noise_rate  # initialize empirical prior for ARLVI (exponential moving average)
     for epoch in range(1, args.n_epoch):
         model.train()
 
@@ -438,7 +438,7 @@ def run():
             epoch=epoch,
             lambda_kl=args.lambda_kl,
             warmup_epochs=args.warmup_epochs,
-            pi_bar=args.noise_rate,  # Use noise_rate as pi_bar for warm-up
+            pi_bar= 1.0 -args.noise_rate,  # Use noise_rate as pi_bar for warm-up
             alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
