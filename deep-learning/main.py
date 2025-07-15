@@ -446,6 +446,8 @@ def run():
             )
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
+            print(f"VAL_ACC={val_acc:.4f}", flush=True)    # Optuna will parse this
+
             # --- Log metrics ---
             writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
             writer.add_scalar("Loss/KL", avg_kl_loss, epoch)
