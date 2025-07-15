@@ -43,6 +43,8 @@ parser.add_argument('--lr_inference', type=float, default=1e-3, help='Learning r
 parser.add_argument('--lr_init', type=float, default=0.01,
                     help='Initial learning rate for model (used by SGD)')
 ###---###
+parser.add_argument('--n_epoch', type=int, help='number of epochs for training', default=80)
+parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=None)
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.9)
@@ -206,8 +208,6 @@ if args.dataset == 'cifar100':
 if args.dataset == 'food101':
     input_channel = 3
     num_classes = 101
-    args.n_epoch = 11 #smaller number for testing purposes -- change to 80 later
-    args.batch_size = 32 
     #args.lr_init = 0.01
     if args.wd is None:
         args.wd = 1e-4
