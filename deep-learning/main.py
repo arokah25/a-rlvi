@@ -206,7 +206,7 @@ if args.dataset == 'cifar100':
 if args.dataset == 'food101':
     input_channel = 3
     num_classes = 101
-    args.n_epoch = 10 #smaller number for testing purposes -- change to 80 later
+    args.n_epoch = 11 #smaller number for testing purposes -- change to 80 later
     args.batch_size = 32 
     #args.lr_init = 0.01
     if args.wd is None:
@@ -380,10 +380,15 @@ def run():
 
  
     #initialize inference network for ARLVI
-    # Feature dimension is the output of ResNet’s penultimate layer
-    feature_dim = model.classifier.in_features # should be 512 for ResNet18
+    # Get the correct feature dimension from the backbone
+    feature_dim = model_classifier.in_features   # 512 (R-18) / 2048 (R-50)
+
+    # Instantiate the inference network with that dimension
     inference_net = InferenceNet(feature_dim).to(DEVICE)
-    optimizer_inf = torch.optim.Adam(inference_net.parameters(), lr=args.lr_inference)
+
+    # Optimiser for the inference network
+    optimizer_inf = torch.optim.Adam(inference_net.parameters(),
+                                    lr=args.lr_inference, weight_decay=1e-4)
 
     # Training
     pi_bar_ema = args.noise_rate  # initialize empirical prior for ARLVI (exponential moving average)
@@ -422,7 +427,7 @@ def run():
         elif args.method == "arlvi":
             # --- Train ARLVI ---
             start_time = time.time()
-            ce_loss, kl_loss, train_acc, mean_pi_i, pi_bar_ema = methods.train_arlvi(
+            avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i, pi_bar_ema = methods.train_arlvi(
             model_features=model_features,
             model_classifier=model_classifier,
             inference_net=inference_net,
@@ -442,8 +447,8 @@ def run():
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             # --- Log metrics ---
-            writer.add_scalar("Loss/CE", ce_loss, epoch)
-            writer.add_scalar("Loss/KL", kl_loss, epoch)
+            writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
+            writer.add_scalar("Loss/KL", avg_kl_loss, epoch)
             writer.add_scalar("Train/Accuracy", train_acc, epoch)
             writer.add_scalar("Inference/MeanPi", mean_pi_i, epoch)
             writer.add_scalar("Test/Accuracy", val_acc, epoch)  # assuming val_loader is your test set
