@@ -5,7 +5,7 @@ train_arlvi.py
 Mini-batch training loop for A-RLVI with practical-stability fixes:
 
   1. Soft squashing of πᵢ ∈ (0.05,0.95) keeps gradients alive.
-  2. Weighted cross-entropy is **normalised by Σ πᵢ** to keep loss scale stable.
+  2. Weighted cross-entropy uses additive form (Σ πᵢ CEᵢ / B) for stronger gradients.
   3. KL prior π̄ is detached from the graph (no gradient into the prior).
   4. π̄ is updated by an EMA **once per epoch** – gives a true anchor.
   5. Entropy regularisation is *subtracted* (encourages uncertainty).
@@ -124,7 +124,7 @@ def train_arlvi(
         else:
             pi_raw = inference_net(z_i)
 
-        pi_i = 0.9 * pi_raw + 0.05            # (0.05,0.95) keeps grad alive
+        pi_i = 0.8 * pi_raw + 0.1     # (0.1, 0.9) keeps gradients alive
 
         all_pi_values.append(pi_i.detach().cpu())
 
@@ -140,7 +140,7 @@ def train_arlvi(
         entropy_reg = beta * entropy.mean()          # subtract later
 
         # ------------- Loss composition -----------------------------
-        ce_weighted = (pi_i * ce_loss).sum() / (pi_i.sum() + eps)
+        ce_weighted = (pi_i * ce_loss).sum() / B
         mean_kl     = kl_loss.mean()
 
         total_loss_batch = ce_weighted + lambda_kl * mean_kl - entropy_reg
@@ -179,7 +179,9 @@ def train_arlvi(
             print(f"[Epoch {epoch:02d} Batch {batch_idx:04d}] "
                   f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
                   f"CE={ce_weighted.item():.3f}  KL={mean_kl.item():.3f}  "
-                  f"|∇φ|={grad_inf:.2f}")
+                  f"|∇φ|={grad_inf:.2f}"
+                  f" ce_loss={total_ce / total_seen:.3f} "
+                  f" kl_loss={total_kl / total_seen:.3f} ")
 
     # ---------------- end mini-batch loop ---------------------------
 
