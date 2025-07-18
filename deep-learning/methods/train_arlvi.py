@@ -10,6 +10,7 @@ Mini-batch training loop for A-RLVI with practical-stability fixes:
   4. π̄ is updated by an EMA **once per epoch** – gives a true anchor.
   5. Entropy regularisation is *subtracted* (encourages uncertainty).
   6. Gradient clipping on the inference net.
+  7. Coefficient on the KL-term is larger directly after the warm up period and gradually decreases to 1 to prevent the CE gradients (large after warmup) from pulling all pi_i down
 
 The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
 `main.py` can feed it into the next epoch.
@@ -143,14 +144,18 @@ def train_arlvi(
         ce_weighted = (pi_i * ce_loss).sum() / B
         mean_kl     = kl_loss.mean()
 
-        total_loss_batch = ce_weighted + lambda_kl * mean_kl - entropy_reg
+        # ----- KL rubber-band: ×3 right after warm-up, then decay ------------------
+        epochs_after = max(epoch - warmup_epochs, 0)
+        lambda_kl = max(1.0, 4.0 - 0.6 * epochs_after)   # 4, 3.4, 2.8, … down to 1
+
+        total_batch_loss = ce_weighted + lambda_kl * mean_kl - entropy_reg
 
         # ------------- Back-prop ------------------------------------
         optimizer.zero_grad()
         if epoch >= warmup_epochs:
             inference_optimizer.zero_grad()
 
-        total_loss_batch.backward()
+        total_batch_loss.backward()
 
         if epoch >= warmup_epochs:
             if grad_clip is not None:
@@ -161,7 +166,7 @@ def train_arlvi(
             optimizer.step()             # θ update only (φ frozen)
 
         # ------------- Stats ----------------------------------------
-        total_loss += total_loss_batch.item() * B
+        total_loss += total_batch_loss.item() * B
         total_ce   += ce_weighted.item()      * B
         total_kl   += mean_kl.item()          * B
         total_seen += B
