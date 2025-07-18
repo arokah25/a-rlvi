@@ -10,7 +10,6 @@ Mini-batch training loop for A-RLVI with practical-stability fixes:
   4. π̄ is updated by an EMA **once per epoch** – gives a true anchor.
   5. Entropy regularisation is *subtracted* (encourages uncertainty).
   6. Gradient clipping on the inference net.
-  7. Coefficient on the KL-term is larger directly after the warm up period and gradually decreases to 1 to prevent the CE gradients (large after warmup) from pulling all pi_i down
 
 The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
 `main.py` can feed it into the next epoch.
@@ -145,10 +144,27 @@ def train_arlvi(
         mean_kl     = kl_loss.mean()
 
         # ----- KL rubber-band: ×3 right after warm-up, then decay ------------------
-        epochs_after = max(epoch - warmup_epochs, 0)
-        lambda_kl = max(1.0, 4.0 - 0.6 * epochs_after)   # 4, 3.4, 2.8, … down to 1
+        # λₖₗ is the base KL weight, e.g. 2.0
+        # λₖₗ is multiplied by a schedule value that starts at 4.
+        # The schedule value decays linearly from 4.0 to 1.0
+        # over the next 5 epochs, but never drops below λₖₗ.
+        # This gives a strong KL penalty at the start, then decays it
+        # to a stable value that is still above the base KL weight.
+        # -----------------------------------------------------------------
+        base_kl = lambda_kl 
 
-        total_batch_loss = ce_weighted + lambda_kl * mean_kl - entropy_reg
+        # rubber-band schedule value: 4.0, 3.4, 2.8, 2.2, 1.6, 1.0 …
+        epochs_after = max(epoch - warmup_epochs, 0)
+        schedule_val = 4.0 - 0.6 * epochs_after
+
+        # effective KL weight: starts at 4, never drops below base_kl
+        kl_weight = max(base_kl, schedule_val)
+
+        total_batch_loss = (
+            ce_weighted                           # additive CE
+            + kl_weight * mean_kl                 # KL with rubber-band
+            - entropy_reg                         # entropy bonus
+        )
 
         # ------------- Back-prop ------------------------------------
         optimizer.zero_grad()
