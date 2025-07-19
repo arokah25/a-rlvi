@@ -323,8 +323,8 @@ def run():
     # Prepare models and optimizers
     if args.dataset == 'food101' and args.method == 'arlvi':
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
-        backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
-        #backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
+        #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
+        backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
         backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes)
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
