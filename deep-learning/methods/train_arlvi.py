@@ -60,7 +60,8 @@ def train_arlvi(
     warmup_epochs: int   = 2,
     alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
     pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
-    beta:          float = 0.1,   # weight on entropy regularisation
+    beta:          float = 0.4,   # initial weight on entropy regularisation before decay
+    tau:           float = 0.7,   # CE-temperature (0<tau<1)
     writer=None,                  # optional TensorBoard writer
     grad_clip:     float = 5.0,   # clip on inference-net gradients (None = off)
 ):
@@ -136,8 +137,19 @@ def train_arlvi(
         kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)         # (B,)
 
         # ------------- Entropy regularisation -----------------------
-        entropy = -(pi_i*torch.log(pi_i+eps) + (1-pi_i)*torch.log(1-pi_i+eps))
-        entropy_reg = beta * entropy.mean()          # subtract later
+        #First we linearly anneal the beta value from 0.4 to 0.0 over the epochs
+        # This is done to encourage exploration at the start of training.
+        decay_start = 10
+        decay_length = 10
+
+        if epoch >= decay_start:
+            frac       = max(0.0, 1.0 - (epoch - decay_start) / decay_length)
+            beta_now   = beta * frac
+        else:
+            beta_now   = beta
+
+        entropy = -(pi_i*torch.log(pi_i+eps) + (1-pi_i)*torch.log(1-pi_i+eps))  
+        entropy_reg = beta_now * entropy.mean()          # subtract later
 
         # ------------- Loss composition -----------------------------
         ce_weighted = (pi_i * ce_loss).sum() / B
