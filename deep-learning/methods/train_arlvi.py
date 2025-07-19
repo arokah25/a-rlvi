@@ -5,11 +5,16 @@ train_arlvi.py
 Mini-batch training loop for A-RLVI with practical-stability fixes:
 
   1. Soft squashing of πᵢ ∈ (0.05,0.95) keeps gradients alive.
-  2. Weighted cross-entropy uses additive form (Σ πᵢ CEᵢ / B) for stronger gradients.
+  2. rubber-band KL weight starts at 4.0, decays to 1.0 over 5 epochs.
   3. KL prior π̄ is detached from the graph (no gradient into the prior).
-  4. π̄ is updated by an EMA **once per epoch** – gives a true anchor.
+  4. π̄ is updated by an EMA **once per epoch** and is detached from the computational graph –-> gives a true regularizing "anchor".
   5. Entropy regularisation is *subtracted* (encourages uncertainty).
+    - it is linearly annealed from β=0.4 to 0.0 over epochs 10-20.
+    - strong initial entropy term keeps φ from over-reacting and collapsing π to 0 or 1
+    - After that we want φ to decide: “this looks corrupt → π→0.1” or “this is clean → π→0.9”
+    - Reducing β removes the tug toward 0.5, letting CE and KL separate the two groups—hence a more bimodal posterior.
   6. Gradient clipping on the inference net.
+
 
 The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
 `main.py` can feed it into the next epoch.
