@@ -14,6 +14,7 @@ Mini-batch training loop for A-RLVI with practical-stability fixes:
     - After that we want φ to decide: “this looks corrupt → π→0.1” or “this is clean → π→0.9”
     - Reducing β removes the tug toward 0.5, letting CE and KL separate the two groups—hence a more bimodal posterior.
   6. Gradient clipping on the inference net.
+  7. Added temperature scaling (convave power) on the pi values in the weighted CE term to boost "uncertain" pi_values and thus keep inference gradients alive longer for those pi values. 
 
 
 The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
@@ -144,7 +145,7 @@ def train_arlvi(
         # ------------- Entropy regularisation -----------------------
         #First we linearly anneal the beta value from 0.4 to 0.0 over the epochs
         # This is done to encourage exploration at the start of training.
-        decay_start = 10
+        decay_start = 7
         decay_length = 10
 
         if epoch >= decay_start:
@@ -157,8 +158,12 @@ def train_arlvi(
         entropy_reg = beta_now * entropy.mean()          # subtract later
 
         # ------------- Loss composition -----------------------------
-        ce_weighted = (pi_i * ce_loss).sum() / B
+        #ce_weighted = (pi_i * ce_loss).sum() / B
+        #mean_kl     = kl_loss.mean()
+        pi_temp     = pi_i ** tau         # temperature scaling  (τ<1) with concave power
+        ce_weighted = (pi_temp * ce_loss).sum() / B
         mean_kl     = kl_loss.mean()
+
 
         # ----- KL rubber-band: ×3 right after warm-up, then decay ------------------
         # λₖₗ is the base KL weight, e.g. 2.0
