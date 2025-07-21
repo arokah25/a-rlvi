@@ -71,8 +71,11 @@ args = parser.parse_args()
 
 #Tensorboard logging (for RLVI and ARLVI)
 from torch.utils.tensorboard import SummaryWriter
-log_dir = f"runs/{args.method}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-writer = SummaryWriter(log_dir=log_dir)
+# write into your result_dir so logs persist in Drive
+timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+log_dir   = os.path.join(args.result_dir, 'tensorboard', args.dataset, args.method, timestamp)
+os.makedirs(log_dir, exist_ok=True)
+writer    = SummaryWriter(log_dir=log_dir)
 
 
 if torch.backends.mps.is_available():
