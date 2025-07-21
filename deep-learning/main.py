@@ -467,7 +467,7 @@ def run():
             alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
-            scheduler=scheduler, # Learning rate scheduler
+            scheduler=scheduler, # OneCycleLR Scheduler
             writer=writer
             )
             epoch_time = time.time() - start_time
