@@ -72,7 +72,10 @@ args = parser.parse_args()
 
 # TensorBoard logging (for RLVI and ARLVI)
 from torch.utils.tensorboard import SummaryWriter
-log_dir = f"runs/{args.method}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+import os
+timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+log_dir = os.path.join(args.result_dir, 'tensorboard', f"{args.method}_{timestamp}")
+os.makedirs(log_dir, exist_ok=True)
 writer = SummaryWriter(log_dir=log_dir)
 
 # Device
