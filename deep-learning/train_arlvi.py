@@ -5,11 +5,16 @@ train_arlvi.py
 Mini-batch training loop for A-RLVI with practical-stability fixes:
 
   1. Soft squashing of πᵢ ∈ (0.05,0.95) keeps gradients alive.
-  2. Weighted cross-entropy is **normalised by Σ πᵢ** to keep loss scale stable.
+  2. rubber-band KL weight starts at 4.0, decays to 1.0 over 5 epochs.
   3. KL prior π̄ is detached from the graph (no gradient into the prior).
-  4. π̄ is updated by an EMA **once per epoch** – gives a true anchor.
+  4. π̄ is updated by an EMA **once per epoch** and is detached from the computational graph –-> gives a true regularizing "anchor".
   5. Entropy regularisation is *subtracted* (encourages uncertainty).
+    - it is linearly annealed from β=0.4 to 0.0 over epochs 10-20.
+    - strong initial entropy term keeps φ from over-reacting and collapsing π to 0 or 1
+    - After that we want φ to decide: “this looks corrupt → π→0.1” or “this is clean → π→0.9”
+    - Reducing β removes the tug toward 0.5, letting CE and KL separate the two groups—hence a more bimodal posterior.
   6. Gradient clipping on the inference net.
+
 
 The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
 `main.py` can feed it into the next epoch.
@@ -60,7 +65,8 @@ def train_arlvi(
     warmup_epochs: int   = 2,
     alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
     pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
-    beta:          float = 0.1,   # weight on entropy regularisation
+    beta:          float = 0.4,   # initial weight on entropy regularisation before decay
+    tau:           float = 0.6,   # CE-temperature (0<tau<1)
     writer=None,                  # optional TensorBoard writer
     grad_clip:     float = 5.0,   # clip on inference-net gradients (None = off)
 ):
@@ -136,21 +142,57 @@ def train_arlvi(
         kl_loss = compute_kl_divergence(pi_i, pi_bar_tensor)         # (B,)
 
         # ------------- Entropy regularisation -----------------------
-        entropy = -(pi_i*torch.log(pi_i+eps) + (1-pi_i)*torch.log(1-pi_i+eps))
-        entropy_reg = beta * entropy.mean()          # subtract later
+        #First we linearly anneal the beta value from 0.4 to 0.0 over the epochs
+        # This is done to encourage exploration at the start of training.
+        decay_start = 12
+        decay_length = 10
+
+        if epoch >= decay_start:
+            frac       = max(0.0, 1.0 - (epoch - decay_start) / decay_length)
+            beta_now   = beta * frac
+        else:
+            beta_now   = beta
+
+        entropy = -(pi_i*torch.log(pi_i+eps) + (1-pi_i)*torch.log(1-pi_i+eps))  
+        entropy_reg = beta_now * entropy.mean()          # subtract later
 
         # ------------- Loss composition -----------------------------
-        ce_weighted = (pi_i * ce_loss).sum() / (pi_i.sum() + eps)
+        #ce_weighted = (pi_i * ce_loss).sum() / B
+        #mean_kl     = kl_loss.mean()
+        pi_temp     = pi_i ** tau         # temperature scaling  (τ<1) with concave power
+        ce_weighted = (pi_temp * ce_loss).sum() / B
         mean_kl     = kl_loss.mean()
 
-        total_loss_batch = ce_weighted + lambda_kl * mean_kl - entropy_reg
+
+        # ----- KL rubber-band: ×3 right after warm-up, then decay ------------------
+        # λₖₗ is the base KL weight, e.g. 2.0
+        # λₖₗ is multiplied by a schedule value that starts at 4.
+        # The schedule value decays linearly from 4.0 to 1.0
+        # over the next 5 epochs, but never drops below λₖₗ.
+        # This gives a strong KL penalty at the start, then decays it
+        # to a stable value that is still above the base KL weight.
+        # -----------------------------------------------------------------
+        base_kl = lambda_kl 
+
+        # rubber-band schedule value: 4.0, 3.4, 2.8, 2.2, 1.6, 1.0 …
+        epochs_after = max(epoch - warmup_epochs, 0)
+        schedule_val = 4.0 - 0.6 * epochs_after
+
+        # effective KL weight: starts at 4, never drops below base_kl
+        kl_weight = max(base_kl, schedule_val)
+
+        total_batch_loss = (
+            ce_weighted                           # additive CE
+            + kl_weight * mean_kl                 # KL with rubber-band
+            - entropy_reg                         # entropy bonus
+        )
 
         # ------------- Back-prop ------------------------------------
         optimizer.zero_grad()
         if epoch >= warmup_epochs:
             inference_optimizer.zero_grad()
 
-        total_loss_batch.backward()
+        total_batch_loss.backward()
 
         if epoch >= warmup_epochs:
             if grad_clip is not None:
@@ -161,7 +203,7 @@ def train_arlvi(
             optimizer.step()             # θ update only (φ frozen)
 
         # ------------- Stats ----------------------------------------
-        total_loss += total_loss_batch.item() * B
+        total_loss += total_batch_loss.item() * B
         total_ce   += ce_weighted.item()      * B
         total_kl   += mean_kl.item()          * B
         total_seen += B
@@ -180,7 +222,7 @@ def train_arlvi(
                   f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
                   f"CE={ce_weighted.item():.3f}  KL={mean_kl.item():.3f}  "
                   f"|∇φ|={grad_inf:.2f}"
-                  f" ce_loss={total_ce / total_seen:.3f}"
+                  f" ce_loss={total_ce / total_seen:.3f} "
                   f" kl_loss={total_kl / total_seen:.3f} ")
 
     # ---------------- end mini-batch loop ---------------------------
