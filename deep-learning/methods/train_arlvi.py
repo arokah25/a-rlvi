@@ -14,7 +14,6 @@ Mini-batch training loop for A-RLVI with practical-stability fixes:
     - After that we want φ to decide: “this looks corrupt → π→0.1” or “this is clean → π→0.9”
     - Reducing β removes the tug toward 0.5, letting CE and KL separate the two groups—hence a more bimodal posterior.
   6. Gradient clipping on the inference net.
-  7. Added temperature scaling (convave power) on the pi values in the weighted CE term to boost "uncertain" pi_values and thus keep inference gradients alive longer for those pi values. 
 
 
 The function returns epoch-level metrics and the updated π̄ₑₘₐ value so
@@ -67,7 +66,8 @@ def train_arlvi(
     alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
     pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
     beta:          float = 0.4,   # initial weight on entropy regularisation before decay
-    tau:           float = 0.7,   # CE-temperature (0<tau<1)
+    tau:           float = 0.6,   # CE-temperature (0<tau<1)
+    scheduler=None,  # optional learning rate scheduler
     writer=None,                  # optional TensorBoard writer
     grad_clip:     float = 5.0,   # clip on inference-net gradients (None = off)
 ):
@@ -145,7 +145,7 @@ def train_arlvi(
         # ------------- Entropy regularisation -----------------------
         #First we linearly anneal the beta value from 0.4 to 0.0 over the epochs
         # This is done to encourage exploration at the start of training.
-        decay_start = 7
+        decay_start = 12
         decay_length = 10
 
         if epoch >= decay_start:
@@ -203,6 +203,15 @@ def train_arlvi(
         else:
             optimizer.step()             # θ update only (φ frozen)
 
+        # --- batch‐wise LR update for OneCycleLR ---
+        if scheduler is not None:
+            scheduler.step()
+
+        current_lr = scheduler.get_last_lr()[0]
+        writer.add_scalar("LR/main", current_lr, epoch * steps_per_epoch + batch_idx)
+
+
+
         # ------------- Stats ----------------------------------------
         total_loss += total_batch_loss.item() * B
         total_ce   += ce_weighted.item()      * B
@@ -218,13 +227,25 @@ def train_arlvi(
             grad_inf = torch.nn.utils.clip_grad_norm_(
                 inference_net.parameters(), float('inf')
             ).item()
+            # inference‐net
+            writer.add_scalar("GradNorm/Inference", grad_inf, epoch * len(dataloader) + batch_idx)
+
+            # classifier (θ)
+            clf_norm = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf')).item()
+            writer.add_scalar("GradNorm/Classifier",  clf_norm, epoch * len(dataloader) + batch_idx)
+
 
             print(f"[Epoch {epoch:02d} Batch {batch_idx:04d}] "
                   f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
                   f"CE={ce_weighted.item():.3f}  KL={mean_kl.item():.3f}  "
                   f"|∇φ|={grad_inf:.2f}"
+                  f"|∇θ|={clf_norm:.2f}"
                   f" ce_loss={total_ce / total_seen:.3f} "
-                  f" kl_loss={total_kl / total_seen:.3f} ")
+                  f" kl_loss={total_kl / total_seen:.3f} "
+                  f" train_acc={total_correct / total_seen:.3f} "
+                  f" lr={current_lr:.6f} "
+                  f" pi_bar_ema={pi_bar_ema:.3f} "
+                  f" β={beta_now:.3f} ")
 
     # ---------------- end mini-batch loop ---------------------------
 
