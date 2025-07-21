@@ -5,17 +5,12 @@ import time
 
 import numpy as np
 import torch
-from torch.optim.lr_scheduler import (
-    MultiplicativeLR,      # for MNIST fallback
-    CosineAnnealingLR,     # for CIFAR / fallback
-    LinearLR,              # warm-up
-    SequentialLR           # warm-up → cosine
-)
+from torch.optim.lr_scheduler import OneCycleLR, MultiplicativeLR, CosineAnnealingLR
+
 import methods
 import data_load
 import data_tools
 import utils
-
 from models.lenet import LeNet
 from models.resnet import ResNet18, ResNet34
 from torchvision.models import resnet18, ResNet18_Weights
@@ -44,8 +39,8 @@ parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
 parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.05)
-parser.add_argument('--lr_inference', type=float, default=1e-3, help='Learning rate for the inference network (Adam)')
-parser.add_argument('--lr_init', type=float, default=0.01,
+parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning rate for the inference network (Adam)')
+parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
 parser.add_argument('--split_percentage', type=float, default=0.1)
 ###---###
@@ -216,7 +211,6 @@ if args.dataset == 'cifar100':
 if args.dataset == 'food101':
     input_channel = 3
     num_classes = 101
-    #args.lr_init = 0.01
     if args.wd is None:
         args.wd = 1e-4
 
@@ -354,25 +348,19 @@ def run():
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
     if args.method == 'arlvi':
-        # warm-up 0.1→1.0 over warmup_epochs
-        warmup_sched = LinearLR(
+                # total number of batches per epoch:
+        steps_per_epoch = len(train_loader)
+        scheduler = OneCycleLR(
             optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=args.warmup_epochs
+            max_lr=args.lr_init,
+            steps_per_epoch=steps_per_epoch,
+            epochs=args.n_epoch,
+            pct_start=args.warmup_epochs / args.n_epoch,
+            anneal_strategy='cosine',
+            div_factor=10.0,         # initial lr = max_lr/div_factor
+            final_div_factor=1e4     # end lr = max_lr/final_div_factor
         )
 
-        # then cosine decay to eta_min
-        cosine_sched = CosineAnnealingLR(
-            optimizer,
-            T_max=max(args.n_epoch - args.warmup_epochs, 1),
-            eta_min=1e-5
-        )
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[warmup_sched, cosine_sched],
-            milestones=[args.warmup_epochs]
-        )
     else:
         # MNIST/CIFAR fallback
         if args.dataset == 'mnist':
@@ -479,6 +467,7 @@ def run():
             alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
+            scheduler=scheduler, # Learning rate scheduler
             writer=writer
             )
             epoch_time = time.time() - start_time
@@ -539,8 +528,6 @@ def run():
             train_acc = methods.train_bare(train_loader, model, optimizer, num_classes)
             val_acc = utils.evaluate(val_loader, model)
 
-        # Update LR
-        scheduler.step()
 
         #### Finish one epoch of training with selected method ####
 
