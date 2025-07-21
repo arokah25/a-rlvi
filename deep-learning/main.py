@@ -359,7 +359,6 @@ def run():
             optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            by_epoch=True,
             total_iters=args.warmup_epochs
         )
 
