@@ -208,7 +208,8 @@ def train_arlvi(
             scheduler.step()
 
         current_lr = scheduler.get_last_lr()[0]
-        writer.add_scalar("LR/main", current_lr, epoch * steps_per_epoch + batch_idx)
+        global_step = epoch * len(dataloader) + batch_idx
+        writer.add_scalar("LR/main", current_lr, global_step)
 
 
 
