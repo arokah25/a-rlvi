@@ -355,8 +355,8 @@ def run():
             max_lr=args.lr_init,
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch,
-            pct_start=args.warmup_epochs / args.n_epoch,
-            anneal_strategy='cosine',
+            pct_start=args.warmup_epochs / args.n_epoch, #percentage of epochs spent increasing the LR 
+            anneal_strategy='cos',
             div_factor=10.0,         # initial lr = max_lr/div_factor
             final_div_factor=1e4     # end lr = max_lr/final_div_factor
         )
