@@ -175,7 +175,7 @@ def train_arlvi(
 
             print(f"[Epoch {epoch:02d} Batch {batch_idx:04d}] "
                   f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
-                  f"CE={ce_weight.item():.3f}  KL={mean_kl.item():.3f}  "
+                  f"CE={ce_weighted.item():.3f}  KL={mean_kl.item():.3f}  "
                   f"|∇φ|={grad_inf:.2f} |∇θcls|={grad_cls:.2f} |∇θbbk|={grad_bbk:.2f}" 
                   f" ce_loss={total_ce / total_seen:.3f} "
                   f" kl_loss={total_kl / total_seen:.3f} "
