@@ -66,7 +66,7 @@ def train_arlvi(
     alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
     pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
     beta:          float = 0.4,   # initial weight on entropy regularisation before decay
-    tau:           float = 0.4,   # CE-temperature (0<tau<1)
+    tau:           float = 0.6,   # CE-temperature (0<tau<1)
     scheduler=None,  # optional learning rate scheduler
     writer=None,                  # optional TensorBoard writer
     grad_clip:     float = 5.0,   # clip on inference-net gradients (None = off)
@@ -131,7 +131,16 @@ def train_arlvi(
         else:
             pi_raw = inference_net(z_i)
 
-        pi_i = 0.9 * pi_raw + 0.05     # (0.05, 0.95) keeps gradients alive
+        # ---- pi_i squash ramp -------------------------------------------------
+        ramp_T  = 6                    # ← take 6 epochs to open fully (tweak freely)
+        t       = min(epoch, ramp_T) / ramp_T     # 0 → 1 over ramp_T epochs
+
+        scale   = 0.4 + 0.55 * t       # 0.40 → 0.95
+        offset  = 0.5 - scale / 2      # 0.30 → 0.025
+        pi_i    = scale * pi_raw + offset
+        # epoch 0 : (0.30 … 0.70)
+        # epoch 3 : (0.48 … 0.52)
+        # epoch 6+: (0.025 … 0.975)  ← almost full range, still keeps grads alive
 
         all_pi_values.append(pi_i.detach().cpu())
 
@@ -146,7 +155,7 @@ def train_arlvi(
         #First we linearly anneal the beta value from 0.4 to 0.0 over the epochs
         # This is done to encourage exploration at the start of training.
         decay_start = 12
-        decay_length = 20
+        decay_length = 22
 
         if epoch >= decay_start:
             frac       = max(0.0, 1.0 - (epoch - decay_start) / decay_length)
@@ -177,7 +186,7 @@ def train_arlvi(
 
         # rubber-band schedule value: 4.0, 3.6, 3.2, 2.8, 2.4, .. 
         epochs_after = max(epoch - warmup_epochs, 0)
-        schedule_val = 4.0 - 0.4 * epochs_after
+        schedule_val = 6 - 0.6 * epochs_after
 
         # effective KL weight: starts at 4, never drops below base_kl
         kl_weight = max(base_kl, schedule_val)
@@ -194,9 +203,9 @@ def train_arlvi(
         optim_classifier = optimizer["classifier"]
 
         optim_backbone.zero_grad(set_to_none=True)
-        optim_classifier.zero_grad(set_to_none=True)
         if epoch >= warmup_epochs:
             inference_optimizer.zero_grad(set_to_none=True)
+            optim_classifier.zero_grad(set_to_none=True)
 
         total_batch_loss.backward()
 
@@ -206,9 +215,9 @@ def train_arlvi(
             torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
 
         optim_backbone.step()
-        optim_classifier.step()
         if epoch >= warmup_epochs:
             inference_optimizer.step()
+            optim_classifier.step()
 
 
         # --- batch‐wise LR update for OneCycleLR ---
@@ -254,7 +263,8 @@ def train_arlvi(
                   f" ce_loss={total_ce / total_seen:.3f} "
                   f" kl_loss={total_kl / total_seen:.3f} "
                   f" train_acc={total_correct / total_seen:.3f} "
-                  f" lr={current_lr:.6f} "
+                  f" lr_cls={current_lr_cls:.6f} "
+                  f" lr_bbk={current_lr_bbk:.6f} "
                   f" pi_bar_ema={pi_bar_ema:.3f} "
                   f" β={beta_now:.3f} ")
 
