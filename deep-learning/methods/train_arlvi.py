@@ -9,7 +9,7 @@ Mini-batch training loop for A-RLVI with practical-stability fixes:
   3. KL prior π̄ is detached from the graph (no gradient into the prior).
   4. π̄ is updated by an EMA **once per epoch** and is detached from the computational graph –-> gives a true regularizing "anchor".
   5. Entropy regularisation is *subtracted* (encourages uncertainty).
-    - it is linearly annealed from β=0.4 to 0.0 over epochs 10-20.
+    - it is linearly annealed from β=0.4 to 0.0 over epochs 12-22.
     - strong initial entropy term keeps φ from over-reacting and collapsing π to 0 or 1
     - After that we want φ to decide: “this looks corrupt → π→0.1” or “this is clean → π→0.9”
     - Reducing β removes the tug toward 0.5, letting CE and KL separate the two groups—hence a more bimodal posterior.
@@ -66,7 +66,7 @@ def train_arlvi(
     alpha:         float = 0.97,  # EMA momentum for π̄ after warm-up
     pi_bar_ema:    float = 0.9,   # running prior coming in from previous epoch
     beta:          float = 0.4,   # initial weight on entropy regularisation before decay
-    tau:           float = 0.6,   # CE-temperature (0<tau<1)
+    tau:           float = 0.4,   # CE-temperature (0<tau<1)
     scheduler=None,  # optional learning rate scheduler
     writer=None,                  # optional TensorBoard writer
     grad_clip:     float = 5.0,   # clip on inference-net gradients (None = off)
@@ -131,7 +131,7 @@ def train_arlvi(
         else:
             pi_raw = inference_net(z_i)
 
-        pi_i = 0.8 * pi_raw + 0.1     # (0.1, 0.9) keeps gradients alive
+        pi_i = 0.9 * pi_raw + 0.05     # (0.05, 0.95) keeps gradients alive
 
         all_pi_values.append(pi_i.detach().cpu())
 
@@ -146,7 +146,7 @@ def train_arlvi(
         #First we linearly anneal the beta value from 0.4 to 0.0 over the epochs
         # This is done to encourage exploration at the start of training.
         decay_start = 12
-        decay_length = 10
+        decay_length = 20
 
         if epoch >= decay_start:
             frac       = max(0.0, 1.0 - (epoch - decay_start) / decay_length)
@@ -175,9 +175,9 @@ def train_arlvi(
         # -----------------------------------------------------------------
         base_kl = lambda_kl 
 
-        # rubber-band schedule value: 4.0, 3.4, 2.8, 2.2, 1.6, 1.0 …
+        # rubber-band schedule value: 4.0, 3.6, 3.2, 2.8, 2.4, .. 
         epochs_after = max(epoch - warmup_epochs, 0)
-        schedule_val = 4.0 - 0.6 * epochs_after
+        schedule_val = 4.0 - 0.4 * epochs_after
 
         # effective KL weight: starts at 4, never drops below base_kl
         kl_weight = max(base_kl, schedule_val)
@@ -187,30 +187,40 @@ def train_arlvi(
             + kl_weight * mean_kl                 # KL with rubber-band
             - entropy_reg                         # entropy bonus
         )
+        # -----------------------------------------------------------------
+        # Backpropagate the total loss
+        # -------- backward ----------
+        optim_backbone = optimizer["backbone"]
+        optim_classifier = optimizer["classifier"]
 
-        # ------------- Back-prop ------------------------------------
-        optimizer.zero_grad()
+        optim_backbone.zero_grad(set_to_none=True)
+        optim_classifier.zero_grad(set_to_none=True)
         if epoch >= warmup_epochs:
-            inference_optimizer.zero_grad()
+            inference_optimizer.zero_grad(set_to_none=True)
 
         total_batch_loss.backward()
 
+        # -------- update θ and φ ----------
+        torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), 5.0)
         if epoch >= warmup_epochs:
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
-            optimizer.step()             # θ update
-            inference_optimizer.step()   # φ update
-        else:
-            optimizer.step()             # θ update only (φ frozen)
+            torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
+
+        optim_backbone.step()
+        optim_classifier.step()
+        if epoch >= warmup_epochs:
+            inference_optimizer.step()
+
 
         # --- batch‐wise LR update for OneCycleLR ---
         if scheduler is not None:
-            scheduler.step()
+            scheduler["backbone"].step()
+            scheduler["classifier"].step()
 
-        current_lr = scheduler.get_last_lr()[0]
+        current_lr_cls = scheduler["classifier"].get_last_lr()[0]
+        current_lr_bbk = scheduler["backbone"].get_last_lr()[0]
         global_step = epoch * len(dataloader) + batch_idx
-        writer.add_scalar("LR/main", current_lr, global_step)
-
+        writer.add_scalar("LR/main_cls", current_lr_cls, global_step)
+        writer.add_scalar("LR/backbone", current_lr_bbk, global_step)
 
 
         # ------------- Stats ----------------------------------------
@@ -270,7 +280,7 @@ def train_arlvi(
         writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
         writer.add_scalar("Loss/KL",          avg_kl_loss, epoch)
         writer.add_scalar("Inference/pi_bar_ema", pi_bar_ema, epoch)
-        if epoch % 10 == 0:
+        if epoch % 3 == 0:
             pi_hist = torch.cat(all_pi_values)
             writer.add_histogram("Inference/PiDistribution", pi_hist, epoch)
             writer.flush()
