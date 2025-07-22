@@ -15,45 +15,55 @@ else:
 
 import data_tools as tools
 
+# --- data_load.py ----------------------------------------------------
 class Food101(torch.utils.data.Dataset):
-    def __init__(self, root, train=True, transform=None, target_transform=None, split_per=0.9, random_seed=1):
-        from torchvision.datasets import Food101
+    """
+    Food-101 loader that respects the official noisy-train / clean-test split.
 
+    Args
+    ----
+    split : {"train", "val", "test"}
+        * "train" → first `split_per` fraction of the 75 750 noisy training imgs
+        * "val"   → remaining fraction of the noisy training imgs
+        * "test"  → 25 250 clean test imgs (always the same, no noise)
+    """
+    def __init__(self, root, split="train", transform=None,
+                 split_per=0.75, random_seed=1, download=True):
+
+        from torchvision.datasets import Food101 as TorchFood101
+
+        assert split in {"train", "val", "test"}
         self.transform = transform
-        self.target_transform = target_transform
 
-        # Load full dataset
-        full_dataset = Food101(root=root, download=True, split='train' if train else 'test')
+        # load the official split
+        base_split = "train" if split in {"train", "val"} else "test"
+        full_ds = TorchFood101(root, split=base_split, download=download)
 
-        # Use internal attributes
-        self.images = full_dataset._image_files
-        self.labels = full_dataset._labels  # Already integers, e.g., 0 to 100
+        self.images = full_ds._image_files
+        self.labels = full_ds._labels          # integers 0‥100
 
-        # Split
-        self.indices = np.arange(len(self.images))
-        np.random.seed(random_seed)
-        np.random.shuffle(self.indices)
+        # optional sub-split only **within** the noisy training subset
+        if split in {"train", "val"} and 0. < split_per < 1.:
+            idx = np.arange(len(self.images))
+            rng = np.random.default_rng(random_seed)
+            rng.shuffle(idx)
 
-        split_idx = int(len(self.indices) * split_per)
-        if train:
-            self.indices = self.indices[:split_idx]
+            cut = int(len(idx) * split_per)
+            self.indices = idx[:cut]  if split == "train" else idx[cut:]
         else:
-            self.indices = self.indices[split_idx:]
+            self.indices = np.arange(len(self.images))
 
-    def __getitem__(self, index):
-        idx = self.indices[index]
-        image = Image.open(self.images[idx]).convert('RGB')
-        label = self.labels[idx]
-
-        if self.transform:
-            image = self.transform(image)
-        if self.target_transform:
-            label = self.target_transform(label)
-
-        return image, label, idx
+    # ------------------------------------------------------------
+    def __getitem__(self, i):
+        real_idx = self.indices[i]
+        img  = Image.open(self.images[real_idx]).convert("RGB")
+        lbl  = self.labels[real_idx]
+        if self.transform: img = self.transform(img)
+        return img, lbl, real_idx
 
     def __len__(self):
         return len(self.indices)
+
 
 
 
