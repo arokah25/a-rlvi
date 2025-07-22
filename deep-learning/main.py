@@ -327,7 +327,7 @@ def run():
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
         #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
-        backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes)
+        backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes) #final classification layer
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
         model_classifier = backbone.fc
@@ -339,27 +339,65 @@ def run():
 
 
     model.to(DEVICE)
-    optimizer = torch.optim.SGD(
-        model.parameters(), 
-        lr=args.lr_init, 
-        weight_decay=args.wd, 
-        momentum=args.momentum
-    )
+
+    # -------------------------------------------------
+    # split params
+    backbone_params   = list(model_features.parameters())
+    classifier_params = list(model_classifier.parameters())
+
+    # Optimize backbone and classifier separately - backbone is SGD, classifier is AdamW
+    
+    #Adam gives the “still learning” head its own adaptive step-size 
+    #to cope with noisy, rapidly changing sample weights, while SGD 
+    #keeps the convolutional filters safe from destructive updates.
+    optim_backbone = torch.optim.SGD(
+            backbone_params, 
+            lr=args.lr_init, 
+            momentum=args.momentum, 
+            weight_decay=args.wd
+        )
+    # AdamW optimizer for the classifier so that it can adapt quickly to non-stationary loss due to changing pi_i values
+    # weight noise makes effective LR fluctuate → SGD can stall
+    # Adam’s normalisation smooths those fluctuations
+    optim_classifier = torch.optim.AdamW(
+            classifier_params, 
+            lr=args.lr_init * 5,  # 5x larger than backbone
+            weight_decay=5e-4
+        )
+
+    # pass both to train_arlvi as dict
+    # ─── unified optimizer ────────────────────────────────
+    optimizer = {"backbone": optim_backbone, "classifier": optim_classifier}
+
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
     if args.method == 'arlvi':
-                # total number of batches per epoch:
+        # total number of batches per epoch:
         steps_per_epoch = len(train_loader)
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=args.lr_init,
-            steps_per_epoch=steps_per_epoch,
-            epochs=args.n_epoch,
-            pct_start=args.warmup_epochs / args.n_epoch, #percentage of epochs spent increasing the LR 
-            anneal_strategy='cos',
-            div_factor=10.0,         # initial lr = max_lr/div_factor
-            final_div_factor=1e4     # end lr = max_lr/final_div_factor
-        )
+
+        scheduler_backbone = OneCycleLR(
+                optim_backbone,
+                max_lr=args.lr_init,              # 1e-3 → 1e-2 peak
+                div_factor=10.,      
+                final_div_factor=1e4,
+                pct_start=args.warmup_epochs / args.n_epoch, 
+                steps_per_epoch=steps_per_epoch, 
+                epochs=args.n_epoch
+            )
+
+        scheduler_classifier = OneCycleLR(
+                optim_classifier,
+                max_lr=args.lr_init*10,           # 1e-2 → 1e-1 peak
+                div_factor=25.,     
+                final_div_factor=1e5,
+                pct_start=0.05, 
+                steps_per_epoch=steps_per_epoch, 
+                epochs=args.n_epoch
+            )
+        schedulers = {"backbone": scheduler_backbone,
+              "classifier": scheduler_classifier}
+
+
 
     else:
         # MNIST/CIFAR fallback
@@ -467,7 +505,7 @@ def run():
             alpha=args.ema_alpha,  # Use the provided alpha for EMA
             pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
             beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
-            scheduler=scheduler, # OneCycleLR Scheduler
+            scheduler=schedulers, # OneCycleLR Scheduler
             writer=writer
             )
             epoch_time = time.time() - start_time
