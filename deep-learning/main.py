@@ -220,17 +220,9 @@ if args.dataset == 'cifar100':
                                             transform=Model.transform_test, 
                                             target_transform=data_tools.transform_target)"""
 # For Food101 dataset (for arlvi and rlvi training):
-if args.dataset == 'food101':
+if args.dataset == "food101":
     input_channel = 3
     num_classes = 101
-    if args.wd is None:
-        args.wd = 1e-4
-
-    # Use existing ResNet model
-    if args.method != 'usdnl':
-        Model = ResNet18
-    else:
-        Model = ResNet18DO  # optional: with dropout
 
     normalize = transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)
     transform_train = transforms.Compose([
@@ -248,19 +240,25 @@ if args.dataset == 'food101':
 
     train_dataset = data_load.Food101(
         root=args.root_dir,
-        train=True,
+        split="train",
         transform=transform_train,
         split_per=args.split_percentage,
-        random_seed=args.seed
+        random_seed=args.seed,
     )
     val_dataset = data_load.Food101(
         root=args.root_dir,
-        train=False,
+        split="val",
         transform=transform_test,
         split_per=args.split_percentage,
-        random_seed=args.seed
+        random_seed=args.seed,
     )
-    test_dataset = val_dataset  # Food101 only comes with 'train' split; no separate test set
+    test_dataset = data_load.Food101(
+        root=args.root_dir,
+        split="test",          # clean!
+        transform=transform_test,
+        split_per=1.0,
+    )
+
 
 
 # For alternative methods:
