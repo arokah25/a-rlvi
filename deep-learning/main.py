@@ -48,7 +48,7 @@ parser.add_argument('--n_epoch', type=int, help='number of epochs for training',
 parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=1e-4)
-parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.1)
+parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.25)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
 parser.add_argument('--momentum', type=int, help='momentum', default=0.9)
 parser.add_argument('--print_freq', type=int, default=1)
@@ -244,6 +244,7 @@ if args.dataset == "food101":
         transform=transform_train,
         split_per=args.split_percentage,
         random_seed=args.seed,
+        download=True
     )
     val_dataset = data_load.Food101(
         root=args.root_dir,
@@ -251,12 +252,14 @@ if args.dataset == "food101":
         transform=transform_test,
         split_per=args.split_percentage,
         random_seed=args.seed,
+        download=True
     )
     test_dataset = data_load.Food101(
         root=args.root_dir,
         split="test",          # clean!
         transform=transform_test,
         split_per=1.0,
+        download=True
     )
 
 
