@@ -41,10 +41,10 @@ def train_arlvi(
     epoch:               int,
     *,
     lambda_kl:     float = 1.0,
-    pi_bar:        float = 0.9,
+    pi_bar:        float = 0.75,  # initial prior belief
     warmup_epochs: int   = 2,
     alpha:         float = 0.97,
-    pi_bar_ema:    float = 0.9,
+    pi_bar_ema:    float = 0.75,
     beta:          float = 0.4,
     tau:           float = 0.6,
     scheduler=None,                    # {"backbone": …, "classifier": …} or None
@@ -101,9 +101,11 @@ def train_arlvi(
         entropy_reg = beta_now * (-(pi_i*torch.log(pi_i+eps) +
                                     (1-pi_i)*torch.log(1-pi_i+eps))).mean()
 
-        # rubber-band KL weight
+        # -----------------------------------------------------------------
+        # rubber-band KL weight: from 2.0 → lambda_kl over 15 epochs after warmup
+        decay_rate = (2.0 - lambda_kl) / 15
         epochs_after = max(epoch - warmup_epochs, 0)
-        kl_lambda    = max(lambda_kl, 6 - 0.6*epochs_after)
+        kl_lambda = max(lambda_kl, 2.0 - decay_rate * epochs_after)
 
         total_batch_loss = ce_weighted + kl_lambda*mean_kl - entropy_reg
 
@@ -165,11 +167,16 @@ def train_arlvi(
                 writer.add_scalar("GradNorm/Inference", grad_inf, step)
                 writer.add_scalar("GradNorm/Classifier", clf_norm, step)
 
+            # Measure grad norm WITHOUT clipping a second time
+            grad_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), float('inf')).item()
+            grad_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf')).item()
+            grad_bbk = torch.nn.utils.clip_grad_norm_(model_features.parameters(), float('inf')).item()
+
+
             print(f"[Epoch {epoch:02d} Batch {batch_idx:04d}] "
                   f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
-                  f"CE={ce_weighted.item():.3f}  KL={mean_kl.item():.3f}  "
-                  f"|∇φ|={(0.00 if epoch < warmup_epochs else grad_inf):.2f}"
-                  f" |∇θ|={clf_norm:.2f}"
+                  f"CE={ce_weight.item():.3f}  KL={mean_kl.item():.3f}  "
+                  f"|∇φ|={grad_inf:.2f} |∇θcls|={grad_cls:.2f} |∇θbbk|={grad_bbk:.2f}" 
                   f" ce_loss={total_ce / total_seen:.3f} "
                   f" kl_loss={total_kl / total_seen:.3f} "
                   f" train_acc={total_correct / total_seen:.3f} "
