@@ -87,6 +87,18 @@ torch.manual_seed(args.seed)
 if DEVICE == "cuda":
     torch.cuda.manual_seed(args.seed)
 
+def pi_stats(model_features, inference_net, loader, device):
+    inference_net.eval()
+    with torch.no_grad():
+        all_pi = []
+        for imgs, *_ in loader:
+            z = model_features(imgs.to(device, non_blocking=True)).flatten(1)
+            all_pi.append(inference_net(z).cpu())
+    pi = torch.cat(all_pi)
+    mean_pi   = pi.mean().item()
+    extreme   = ((pi < 0.2) | (pi > 0.8)).float().mean().item()
+    return mean_pi, extreme
+
 
 
 """# Load datasets for training, validation, and testing
@@ -387,7 +399,7 @@ def run():
 
         scheduler_classifier = OneCycleLR(
                 optim_classifier,
-                max_lr=args.lr_init*10,           # 1e-2 → 1e-1 peak
+                max_lr=args.lr_init*5,           # 1e-2 → 1e-1 peak
                 div_factor=25.,     
                 final_div_factor=1e5,
                 pct_start=0.05, 
@@ -511,6 +523,14 @@ def run():
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             print(f"VAL_ACC={val_acc:.4f}%", flush=True)    # Optuna will parse this
+            mean_pi_val, frac_extreme = pi_stats(model_features,
+                                                inference_net,
+                                                val_loader,
+                                                DEVICE)
+            writer.add_scalar("Val/MeanPi",        mean_pi_val,   epoch)
+            writer.add_scalar("Val/FracExtremePi", frac_extreme,  epoch)
+
+
 
             # --- Log metrics ---
             writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
