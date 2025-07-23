@@ -224,19 +224,24 @@ if args.dataset == "food101":
     input_channel = 3
     num_classes = 101
 
-    normalize = transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)
+    # in main.py, Food101 transform block
+    normalize = transforms.Normalize([0.485,0.456,0.406],
+                                    [0.229,0.224,0.225])
+
     transform_train = transforms.Compose([
-        transforms.Resize(128),
-        transforms.CenterCrop(112),
+        transforms.RandomResizedCrop(224, scale=(0.5,1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(0.4,0.4,0.4,0.2),
         transforms.ToTensor(),
         normalize,
     ])
     transform_test = transforms.Compose([
-        transforms.Resize(128),
-        transforms.CenterCrop(112),
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
         transforms.ToTensor(),
         normalize,
     ])
+
 
     train_dataset = data_load.Food101(
         root=args.root_dir,
@@ -374,7 +379,7 @@ def run():
     # Adam’s normalisation smooths those fluctuations
     optim_classifier = torch.optim.AdamW(
             classifier_params, 
-            lr=args.lr_init * 5,  # 5x larger than backbone
+            lr=args.lr_init * 30,  # 30x larger than backbone
             weight_decay=5e-4
         )
 
@@ -390,7 +395,7 @@ def run():
 
         scheduler_backbone = OneCycleLR(
                 optim_backbone,
-                max_lr=args.lr_init,              # 1e-3 → 1e-2 peak
+                max_lr=args.lr_init * 10,      
                 div_factor=10.,      
                 final_div_factor=1e4,
                 pct_start=args.warmup_epochs / args.n_epoch, 
@@ -400,7 +405,7 @@ def run():
 
         scheduler_classifier = OneCycleLR(
                 optim_classifier,
-                max_lr=args.lr_init*5,           # 1e-2 → 1e-1 peak
+                max_lr=args.lr_init*30,      
                 div_factor=25.,     
                 final_div_factor=1e5,
                 pct_start=0.05, 
