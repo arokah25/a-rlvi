@@ -472,7 +472,10 @@ def run():
                                     lr=args.lr_inference, weight_decay=1e-4)
 
     # Training
-    pi_bar_ema = 0.75  # initialize empirical prior for ARLVI (exponential moving average)
+    # Vector of class-specific priors, initialized to 0.75
+    pi_bar_class = torch.full((101,), 0.75, dtype=torch.float32).to(DEVICE)
+
+
     for epoch in range(1, args.n_epoch):
         model.train()
 
@@ -508,24 +511,26 @@ def run():
         elif args.method == "arlvi":
             # --- Train ARLVI ---
             start_time = time.time()
-            avg_ce_loss, avg_kl_loss, train_acc, mean_pi_i, pi_bar_ema = methods.train_arlvi(
-            model_features=model_features,
-            model_classifier=model_classifier,
-            inference_net=inference_net,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            inference_optimizer=optimizer_inf,
-            device=DEVICE,
-            epoch=epoch,
-            lambda_kl=args.lambda_kl,
-            warmup_epochs=args.warmup_epochs,
-            pi_bar= 0.75,  # Fixed pi_bar for warm-up
-            alpha=args.ema_alpha,  # Use the provided alpha for EMA
-            pi_bar_ema=pi_bar_ema,  # Use the initialized pi_bar_ema
-            beta=args.beta_entropy_reg,  # Use the provided beta for entropy regularization
-            scheduler=schedulers, # OneCycleLR Scheduler
-            writer=writer
-            )
+            ce_loss, kl_loss, train_acc, pi_bar_class, pi_hist_data = train_arlvi(
+                    model_features      = model_features,
+                    model_classifier    = model_classifier,
+                    inference_net       = inference_net,
+                    dataloader          = train_loader,
+                    optimizer           = optimizer,
+                    inference_optimizer = optimizer_inf,          # ← renamed
+                    device              = DEVICE,
+                    epoch               = epoch,
+                    lambda_kl           = args.lambda_kl,
+                    pi_bar              = 0.75,                   # scalar warm-up prior
+                    warmup_epochs       = args.warmup_epochs,
+                    alpha               = args.ema_alpha,
+                    pi_bar_class        = pi_bar_class,           # running tensor
+                    beta                = args.beta_entropy_reg,
+                    tau                 = 0.6,                    # leave default
+                    scheduler           = schedulers,             # ← pass the dict
+                    writer              = writer,
+                    grad_clip           = 5.0
+                )
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             print(f"VAL_ACC={val_acc:.4f}%", flush=True)    # Optuna will parse this
@@ -539,13 +544,11 @@ def run():
 
 
             # --- Log metrics ---
-            writer.add_scalar("Loss/CE_weighted", avg_ce_loss, epoch)
-            writer.add_scalar("Loss/KL", avg_kl_loss, epoch)
-            writer.add_scalar("Train/Accuracy", train_acc, epoch)
-            writer.add_scalar("Inference/MeanPi", mean_pi_i, epoch)
-            writer.add_scalar("Test/Accuracy", val_acc, epoch)  # assuming val_loader is your test set
+            writer.add_scalar("Loss/CE_weighted", ce_loss, epoch)
+            writer.add_scalar("Loss/KL",          kl_loss, epoch)
+            writer.add_scalar("Train/Accuracy",   train_acc, epoch)
+            writer.add_scalar("Test/Accuracy",    val_acc, epoch)
             writer.add_scalar("Epoch/Time", epoch_time, epoch)
-            writer.add_scalar("Inference/pi_bar_ema", pi_bar_ema, epoch)
 
 
             # Skip this line if dataset is Food101:
