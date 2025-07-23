@@ -80,7 +80,7 @@ def train_arlvi(
         # ---------- posterior πᵢ with ramp ---------------------------
         with torch.set_grad_enabled(epoch >= warmup_epochs):
             pi_raw = inference_net(z_i)
-
+        # Soft squashing of πᵢ ∈ (0.05, 0.95) to keep gradients alive
         ramp_T = 6
         t      = min(epoch, ramp_T) / ramp_T
         scale  = 0.4 + 0.55 * t            # 0.40 → 0.95
@@ -137,8 +137,7 @@ def train_arlvi(
         # Scheduler for head moves only when the head is updating
         if scheduler is not None:
             scheduler["backbone"].step()
-            if epoch >= warmup_epochs:
-                scheduler["classifier"].step()
+            scheduler["classifier"].step()
 
         # ---------- stats --------------------------------------------
         total_loss += total_batch_loss.item()*B
