@@ -74,8 +74,14 @@ def train_arlvi(
         B = images.size(0)
 
         # ---------- forward ------------------------------------------
-        z_i    = model_features(images).view(B, -1)
-        logits = model_classifier(z_i)
+
+        z_i = model_features(images).view(B, -1)
+        if epoch < warmup_epochs:
+            with torch.no_grad():
+                logits = model_classifier(z_i)
+        else:
+            logits = model_classifier(z_i)
+
 
         # ---------- posterior πᵢ with ramp ---------------------------
         with torch.set_grad_enabled(epoch >= warmup_epochs):
