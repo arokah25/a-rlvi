@@ -85,17 +85,17 @@ def train_arlvi(
     for batch_idx, (images, labels, *_) in enumerate(dataloader):
         # Move batch to device
         images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-        B = images.size(0)
+        B = images.size(0) # batch size
 
         # --------------------------------------------------------------
         # Forward pass – feature extractor + (optionally frozen) classifier
         # --------------------------------------------------------------
-        z_i = model_features(images).view(B, -1)
-        if epoch < warmup_epochs:                 # classifier frozen => no grad
-            with torch.no_grad():
-                logits = model_classifier(z_i)
-        else:
-            logits = model_classifier(z_i)
+        # model_features: backbone (e.g., ResNet50) extracts features zᵢ
+        # model_classifier: classifier (e.g., linear layer) predicts logits
+        # z_i: shape [B, d] where d is the feature dimension (e.g., 2048 for ResNet50)
+        # logits: shape [B, num_classes] – class predictions
+        z_i = model_features(images).view(B, -1) # [B, d]
+        logits = model_classifier(z_i) # [B, num_classes]
 
         # --------------------------------------------------------------
         # Inference network predicts πᵢ; gradients flow only after warm-up
@@ -115,7 +115,7 @@ def train_arlvi(
         offset = 0.05                         # left border
         pi_i   = scale * pi_raw + offset      # pi_raw ∈ (0,1) → pi_i ∈ (0.05,0.95)
 
-        # Save for histograms / EMA
+        # Save for histograms of pi_i and EMA updates of per-class priors
         all_pi_values.append(pi_i.detach().cpu())
         all_labels.append(labels.detach().cpu())
 
@@ -126,7 +126,13 @@ def train_arlvi(
         if epoch < warmup_epochs or pi_bar_class is None:
             prior_value = torch.full_like(pi_i, pi_bar)          # [B,1] scalar prior
         else:
-            # pick prior for each sample’s true class and expand to match πᵢ shape
+            # pi_bar_class: shape [num_classes]
+            # labels: shape [B] with class indices
+            # prior_value: shape [B,1] with prior for each sample
+            # For each element in labels, PyTorch looks up the 
+            # corresponding entry in pi_bar_class.
+            # Result: a 1-D tensor of length B whose i-th value is 
+            # the prior for that sample’s true class
             prior_value = pi_bar_class[labels].unsqueeze(1)      # [B,1]
 
         # --------------------------------------------------------------
@@ -134,17 +140,17 @@ def train_arlvi(
         # --------------------------------------------------------------
         ce_loss   = F.cross_entropy(logits, labels, reduction='none')         # [B]
         kl_loss   = compute_kl_divergence(pi_i, prior_value)                  # [B,1]
-        pi_temp   = pi_i ** tau
-        ce_weight = (pi_temp.detach().squeeze(1) * ce_loss).mean()            # detach πᵢ
+        pi_temp   = pi_i ** tau 
+        ce_weight = (pi_temp.detach() * ce_loss).mean()            # detach πᵢ
         mean_kl   = kl_loss.mean()
 
         # Entropy regulariser – linearly annealed β
         decay_start, decay_len = 12, 22
-        beta_now = beta * max(0., 1. - max(epoch - decay_start, 0) / decay_len)
+        beta_now = beta * max(0, 1 - max(epoch - decay_start, 0) / decay_len)
         entropy_reg = beta_now * (-(pi_i * torch.log(pi_i + eps) +
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
 
-        # Rubber-band λ_KL schedule (4.0 → λ over 15 epochs after warm-up)
+        # Rubber-band λ_KL schedule (3.0 → λ over 15 epochs after warm-up)
         decay_rate   = (3.0 - lambda_kl) / 15.0
         kl_lambda    = 3.0 - decay_rate * max(epoch - warmup_epochs, 0)
         kl_lambda    = max(kl_lambda, lambda_kl)
@@ -156,6 +162,7 @@ def train_arlvi(
         # --------------------------------------------------------------
         optim_bbk = optimizer['backbone']
         optim_cls = optimizer['classifier']
+        
         optim_bbk.zero_grad(set_to_none=True)
         optim_cls.zero_grad(set_to_none=True)
         if epoch >= warmup_epochs:
@@ -167,12 +174,14 @@ def train_arlvi(
         if epoch >= warmup_epochs:
             torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
 
+        # Optimisers step
+        # Note: inference and classifier optimizers are only updated after warm-up
         optim_bbk.step()
         if epoch >= warmup_epochs:
             optim_cls.step()
             inference_optimizer.step()
 
-        # Scheduler **after** optimiser step (PyTorch recommendation)
+        # Scheduler step after optimiser step (PyTorch recommendation)
         if scheduler is not None:
             scheduler['backbone'].step()
             scheduler['classifier'].step()
@@ -227,8 +236,8 @@ def train_arlvi(
             # Console debug print
             print(
                 f"[Ep {epoch:02d} Bt {batch_idx:04d}] "
-                f"πᵢ μ={pi_i.mean():.3f} min={pi_i.min():.2f} max={pi_i.max():.2f} "
-                f"entropy={entropy_val:.2f} "
+                f"πᵢ batch_μ={pi_i.mean():.3f} batch_min={pi_i.min():.2f} batch_max={pi_i.max():.2f} "
+                f"batch_entropy={entropy_val:.2f} "
                 f"pī_c∈[{pi_bar_min:.2f},{pi_bar_max:.2f}] "
                 f"cleanest_cls={top_clean:03d} noisiest_cls={top_noisy:03d} "
                 f"CE={ce_weight.item():.3f} KL={mean_kl.item():.3f} "
@@ -239,15 +248,17 @@ def train_arlvi(
     # End-of-epoch updates – EMA for class priors + scalar prior update
     # ------------------------------------------------------------------
     if pi_bar_class is not None and epoch >= warmup_epochs:
-        all_pi_cat     = torch.cat(all_pi_values).squeeze(1)
+        #concatenate all pi_i values and labels in the epoch for class-wise updates
+        all_pi_cat     = torch.cat(all_pi_values)
         all_labels_cat = torch.cat(all_labels)
         for cls in range(pi_bar_class.size(0)):
-            mask = (all_labels_cat == cls)
+            mask = (all_labels_cat == cls) # "mask": Boolean tensor that selects all samples of class 'cls' in this epoch
             if mask.any():
+                # Exponential moving average update for class priors
                 pi_cls_mean = all_pi_cat[mask].mean().to(device)
                 pi_bar_class[cls] = alpha * pi_bar_class[cls] + (1 - alpha) * pi_cls_mean
 
-    mean_pi_i = torch.cat(all_pi_values).mean().item()
+    mean_pi_i = torch.cat(all_pi_values).mean().item() # overall mean πᵢ in epoch
 
     avg_ce_loss = total_ce / total_seen
     avg_kl_loss = total_kl / total_seen
@@ -259,15 +270,15 @@ def train_arlvi(
         writer.add_scalar('Loss/KL',          avg_kl_loss, epoch)
         writer.add_scalar('Inference/pi_i_mean', mean_pi_i, epoch)
         if epoch % 3 == 0:
-            writer.add_histogram('Inference/PiDistribution', torch.cat(all_pi_values), epoch)
+            writer.add_histogram(f'Inference/PiDistribution epoch {epoch}', torch.cat(all_pi_values), epoch)
 
-    # Histogram data (optional) – only keep for cleanest/noisiest classes for caller plotting
+    # Histogram data  – only keep for cleanest/noisiest classes for caller plotting
     hist_data: Dict[str, torch.Tensor] = {}
     if epoch % 3 == 0 and pi_bar_class is not None:
         cls_order = pi_bar_class.detach().cpu().numpy().argsort()
         cleanest  = cls_order[-5:]
         noisiest  = cls_order[:5]
-        all_pi_cat     = torch.cat(all_pi_values).squeeze(1)
+        all_pi_cat     = torch.cat(all_pi_values)
         all_labels_cat = torch.cat(all_labels)
         for tag, cls_ids in [('cleanest', cleanest), ('noisiest', noisiest)]:
             for c in cls_ids:
