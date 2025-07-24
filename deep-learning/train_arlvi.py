@@ -53,9 +53,9 @@ def train_arlvi(
     lambda_kl:           float = 1.0,
     pi_bar:              float = 0.75,   # scalar prior used during warm-up
     warmup_epochs:       int   = 2,
-    alpha:               float = 0.90,   # EMA momentum for per-class priors
+    alpha:               float = 0.85,   # EMA momentum for per-class priors
     pi_bar_class:        torch.Tensor | None = None,  # shape [num_classes]
-    beta:                float = 0.4,
+    beta:                float = 0.2,
     tau:                 float = 0.6,
     scheduler:           Dict[str, torch.optim.lr_scheduler._LRScheduler] | None = None,
     writer=None,
@@ -150,10 +150,9 @@ def train_arlvi(
         entropy_reg = beta_now * (-(pi_i * torch.log(pi_i + eps) +
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
 
-        # Rubber-band λ_KL schedule (3.0 → λ over 15 epochs after warm-up)
-        decay_rate   = (3.0 - lambda_kl) / 15.0
-        kl_lambda    = 3.0 - decay_rate * max(epoch - warmup_epochs, 0)
-        kl_lambda    = max(kl_lambda, lambda_kl)
+        # ── Rubber-band schedule 
+        decay_rate   = (2.0 - lambda_kl) / 15.0    # <-- keep as is
+        kl_lambda    = max( 0.7, 2.0 - decay_rate * max(epoch - warmup_epochs, 0) )
 
         total_batch_loss = ce_weight + kl_lambda * mean_kl - entropy_reg
 
