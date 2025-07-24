@@ -511,7 +511,7 @@ def run():
         elif args.method == "arlvi":
             # --- Train ARLVI ---
             start_time = time.time()
-            ce_loss, kl_loss, train_acc, pi_bar_class, pi_hist_data = train_arlvi(
+            ce_loss, kl_loss, train_acc, pi_bar_class, pi_hist_data = methods.train_arlvi(
                     model_features      = model_features,
                     model_classifier    = model_classifier,
                     inference_net       = inference_net,
