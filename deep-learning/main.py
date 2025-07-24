@@ -37,7 +37,7 @@ parser.add_argument('--lambda_kl', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term')
 parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
-parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
+parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.90)
 parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.05)
 parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning rate for the inference network (Adam)')
 parser.add_argument('--lr_init', type=float, default=1e-3,
