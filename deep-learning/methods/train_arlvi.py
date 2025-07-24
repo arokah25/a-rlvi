@@ -8,7 +8,7 @@ extensive diagnostics printed every 500 batches.
 Key implementation notes
 ------------------------
 1. **Soft squashing of πᵢ** keeps gradients alive in (0.05, 0.95).
-2. **Rubber-band KL weight** linearly decays 4.0 → λ over 15 epochs (after warm-up).
+2. **Rubber-band KL weight** linearly decays 3.0 → λ over 15 epochs (after warm-up).
 3. **Class-conditioned prior π̄_c** scalar during warm-up, per-class EMA afterwards.
 4. **Detach πᵢ from CE** avoids feedback loop between classifier errors and πᵢ.
 5. **Entropy regularisation** β linearly decays 0.4 → 0 between epochs 12-22.
@@ -53,7 +53,7 @@ def train_arlvi(
     lambda_kl:           float = 1.0,
     pi_bar:              float = 0.75,   # scalar prior used during warm-up
     warmup_epochs:       int   = 2,
-    alpha:               float = 0.97,   # EMA momentum for per-class priors
+    alpha:               float = 0.90,   # EMA momentum for per-class priors
     pi_bar_class:        torch.Tensor | None = None,  # shape [num_classes]
     beta:                float = 0.4,
     tau:                 float = 0.6,
@@ -104,11 +104,16 @@ def train_arlvi(
             pi_raw = inference_net(z_i)           # unconstrained in (0,1)
 
         # Soft squashing so πᵢ ∈ (0.05,0.95) and ramp-up keeps early grads alive
-        ramp_T = 6
-        t      = min(epoch, ramp_T) / ramp_T      # 0 → 1 across first 6 epochs
-        scale  = 0.40 + 0.55 * t                 # 0.40 → 0.95
-        offset = 0.5 - scale / 2
-        pi_i   = scale * pi_raw + offset          # shape [B,1] or [B]
+        #ramp_T = 6
+        #t      = min(epoch, ramp_T) / ramp_T      # 0 → 1 across first 6 epochs
+        #scale  = 0.40 + 0.55 * t                 # 0.40 → 0.95
+        #offset = 0.5 - scale / 2
+        #pi_i   = scale * pi_raw + offset          # shape [B,1] or [B]
+
+        # Soft squashing of πᵢ 
+        scale  = 0.90                         # width of the open interval
+        offset = 0.05                         # left border
+        pi_i   = scale * pi_raw + offset      # pi_raw ∈ (0,1) → pi_i ∈ (0.05,0.95)
 
         # Save for histograms / EMA
         all_pi_values.append(pi_i.detach().cpu())
@@ -140,8 +145,8 @@ def train_arlvi(
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
 
         # Rubber-band λ_KL schedule (4.0 → λ over 15 epochs after warm-up)
-        decay_rate   = (4.0 - lambda_kl) / 15.0
-        kl_lambda    = 4.0 - decay_rate * max(epoch - warmup_epochs, 0)
+        decay_rate   = (3.0 - lambda_kl) / 15.0
+        kl_lambda    = 3.0 - decay_rate * max(epoch - warmup_epochs, 0)
         kl_lambda    = max(kl_lambda, lambda_kl)
 
         total_batch_loss = ce_weight + kl_lambda * mean_kl - entropy_reg
