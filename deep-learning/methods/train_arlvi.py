@@ -60,7 +60,7 @@ def train_arlvi(
     max_gamma:           float = 0.2,  # max attachment of πᵢ on the CE term (after ramp-up)
     scheduler:           Dict[str, torch.optim.lr_scheduler._LRScheduler] | None = None,
     writer=None,
-    grad_clip:           float = 5.0,
+    grad_clip:           float = 2.0,
 ) -> Tuple[float, float, float, torch.Tensor, Dict[str, torch.Tensor]]:
     """Train A-RLVI for **one epoch**.
 
@@ -145,7 +145,7 @@ def train_arlvi(
         pi_temp   = pi_i ** tau 
 
         # Partial detachment of πᵢ on the CE term with ramp-up
-        gamma_ramp_epochs = 4
+        gamma_ramp_epochs = 1
         if epoch < warmup_epochs:
             gamma = 0.0  # full detachment during warm-up
         else:
@@ -161,7 +161,7 @@ def train_arlvi(
 
         # Entropy regulariser – linearly annealed β
         decay_start, decay_len = 4, 14
-        beta_now = beta * max(0.05, 1 - max(epoch - decay_start, 0) / decay_len)
+        beta_now = beta * max(0.1, 1 - max(epoch - decay_start, 0) / decay_len)
         entropy_reg = beta_now * (-(pi_i * torch.log(pi_i + eps) +
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
 
@@ -251,11 +251,11 @@ def train_arlvi(
             # Console debug print
             print(
                 f"[Ep {epoch:02d} Bt {batch_idx:04d}] "
+                f"kl_loss={mean_kl.item():.3f}, ce_loss={weighted_ce_loss.item():.3f} "
                 f"πᵢ batch_μ={pi_i.mean():.3f} batch_min={pi_i.min():.2f} batch_max={pi_i.max():.2f} "
                 f"batch_entropy={entropy_val:.2f} "
                 f"pī_c∈[{pi_bar_min:.2f},{pi_bar_max:.2f}] "
                 f"cleanest_cls={top_clean:03d} noisiest_cls={top_noisy:03d} "
-                f"CE={weighted_ce_loss.item():.3f} KL={mean_kl.item():.3f} "
                 f"|∇φ|={grad_inf:.2f} |∇θcls|={grad_cls:.2f} |∇θbbk|={grad_bbk:.2f} "
                 f"lr_cls={lr_cls:.6f} lr_bbk={lr_bbk:.6f}")
 
