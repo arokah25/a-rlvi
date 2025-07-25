@@ -53,10 +53,11 @@ def train_arlvi(
     lambda_kl:           float = 1.0,
     pi_bar:              float = 0.75,   # scalar prior used during warm-up
     warmup_epochs:       int   = 2,
-    alpha:               float = 0.90,   # EMA momentum for per-class priors
+    alpha:               float = 0.85,   # EMA momentum for per-class priors
     pi_bar_class:        torch.Tensor | None = None,  # shape [num_classes]
     beta:                float = 0.4,
     tau:                 float = 0.6,
+    max_gamma:           float = 0.2,  # max attachment of πᵢ on the CE term (after ramp-up)
     scheduler:           Dict[str, torch.optim.lr_scheduler._LRScheduler] | None = None,
     writer=None,
     grad_clip:           float = 5.0,
@@ -140,22 +141,36 @@ def train_arlvi(
         # --------------------------------------------------------------
         ce_loss   = F.cross_entropy(logits, labels, reduction='none')         # [B]
         kl_loss   = compute_kl_divergence(pi_i, prior_value)                  # [B,1]
-        pi_temp   = pi_i ** tau 
-        ce_weight = (pi_temp.detach() * ce_loss).mean()            # detach πᵢ
         mean_kl   = kl_loss.mean()
+        pi_temp   = pi_i ** tau 
+
+        # Partial detachment of πᵢ on the CE term with ramp-up
+        gamma_ramp_epochs = 4
+        if epoch < warmup_epochs:
+            gamma = 0.0  # full detachment during warm-up
+        else:
+            # linear ramp to gamma_max over gamma_ramp epochs
+            progress = (epoch - warmup_epochs + 1) / gamma_ramp_epochs
+            gamma = min(max_gamma, progress * max_gamma)
+        
+
+        # -- compute CE weight -----
+        # element-wise weights
+        ce_weight = (1 - gamma) * pi_temp.detach() + gamma * pi_temp   # blend
+        weighted_ce_loss = (ce_weight * ce_loss).mean()  
 
         # Entropy regulariser – linearly annealed β
-        decay_start, decay_len = 12, 22
-        beta_now = beta * max(0, 1 - max(epoch - decay_start, 0) / decay_len)
+        decay_start, decay_len = 4, 14
+        beta_now = beta * max(0.05, 1 - max(epoch - decay_start, 0) / decay_len)
         entropy_reg = beta_now * (-(pi_i * torch.log(pi_i + eps) +
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
 
-        # Rubber-band λ_KL schedule (3.0 → λ over 15 epochs after warm-up)
-        decay_rate   = (3.0 - lambda_kl) / 15.0
-        kl_lambda    = 3.0 - decay_rate * max(epoch - warmup_epochs, 0)
-        kl_lambda    = max(kl_lambda, lambda_kl)
+        # Rubber-band λ_KL schedule (2.0 → λ over 15 epochs after warm-up)
+        decay_rate   = (2.0 - lambda_kl) / 15.0
+        kl_lambda    = 2.0 - decay_rate * max(epoch - warmup_epochs, 0)
+        kl_lambda    = max(lambda_kl, kl_lambda)
 
-        total_batch_loss = ce_weight + kl_lambda * mean_kl - entropy_reg
+        total_batch_loss = weighted_ce_loss + kl_lambda * mean_kl - entropy_reg
 
         # --------------------------------------------------------------
         # Back-prop and optimiser / scheduler steps
@@ -190,7 +205,7 @@ def train_arlvi(
         # Running aggregates
         # --------------------------------------------------------------
         total_loss   += total_batch_loss.item() * B
-        total_ce     += ce_weight.item() * B
+        total_ce     += weighted_ce_loss.item() * B
         total_kl     += mean_kl.item() * B
         total_seen   += B
         total_correct += logits.argmax(1).eq(labels).sum().item()
@@ -240,7 +255,7 @@ def train_arlvi(
                 f"batch_entropy={entropy_val:.2f} "
                 f"pī_c∈[{pi_bar_min:.2f},{pi_bar_max:.2f}] "
                 f"cleanest_cls={top_clean:03d} noisiest_cls={top_noisy:03d} "
-                f"CE={ce_weight.item():.3f} KL={mean_kl.item():.3f} "
+                f"CE={weighted_ce_loss.item():.3f} KL={mean_kl.item():.3f} "
                 f"|∇φ|={grad_inf:.2f} |∇θcls|={grad_cls:.2f} |∇θbbk|={grad_bbk:.2f} "
                 f"lr_cls={lr_cls:.6f} lr_bbk={lr_bbk:.6f}")
 
