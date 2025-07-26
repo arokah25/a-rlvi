@@ -1,37 +1,66 @@
+# inference_net.py
+# Amortised corruption-probability predictor for A-RLVI
+# -----------------------------------------------------
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class InferenceNet(nn.Module):
     """
-    Inference network f_ϕ(zᵢ) that maps a feature vector zᵢ ∈ ℝᵈ 
-    to a scalar πᵢ ∈ (0, 1), representing the belief that example i is clean.
+    f_φ : ℝ^D  →  (0,1)
+    Takes a backbone feature-vector z_i (and optionally a 1-D context
+    signal) and outputs π_i – the model’s belief that sample i is clean.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int = 128):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        use_context: bool = True,
+        dropout_p: float = 0.10,
+    ):
         """
-        Args:
-            input_dim: Dimensionality of the input feature vector zᵢ (e.g., 2048 for ResNet50)
-            hidden_dim: Size of the hidden layer (default: 128)
+        Parameters
+        ----------
+        input_dim   – dimensionality of backbone features (e.g. 2048 for ResNet-50)
+        hidden_dim  – width of the intermediate layer
+        use_context – if True, concatenate a scalar “context” input (see below)
+        dropout_p   – dropout rate after the hidden layer
         """
         super().__init__()
+        self.use_ctx   = use_context
+        self.dropout_p = dropout_p
 
-        # 2-layer MLP: zᵢ → hidden → output logit → sigmoid(πᵢ)
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
+        # 1. Feature path
+        self.norm = nn.LayerNorm(input_dim)          # keeps every dim on the same scale
+        self.fc1  = nn.Linear(input_dim, hidden_dim)
+        self.fc2  = nn.Linear(hidden_dim, 1)
 
-    def forward(self, z_i: torch.Tensor) -> torch.Tensor:
+        # 2. Optional context (scalar per sample, no bias)
+        if self.use_ctx:
+            self.ctx_fc = nn.Linear(1, hidden_dim, bias=False)
+
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        z_i: torch.Tensor,            # (B, D)
+        ctx: torch.Tensor | None = None,  # (B,) or None
+    ) -> torch.Tensor:
         """
-        Forward pass through the inference network.
-
-        Args:
-            z_i: Tensor of shape (batch_size, input_dim) from model_features
-
-        Returns:
-            pi_i: Tensor of shape (batch_size,), belief scores πᵢ ∈ (0, 1)
+        Returns
+        -------
+        π_i : (B,)  – probability each sample is clean
         """
-        h = F.relu(self.fc1(z_i))        # shape: (batch_size, hidden_dim)
-        logits = self.fc2(h).squeeze(1)  # shape: (batch_size,)
-        pi_i = torch.sigmoid(logits)     # constrain to (0, 1)
+        x = self.norm(z_i)                           # (B, D), LayerNorm
 
-        return pi_i
+        h = F.relu(self.fc1(x))                      # (B, H)
+        if self.use_ctx and ctx is not None:
+            h = h + self.ctx_fc(ctx.unsqueeze(1))    # add context embedding
+
+        h = F.dropout(h, p=self.dropout_p, training=self.training)
+
+        logits = self.fc2(h).squeeze(1)              # (B,)
+        pi_i = torch.sigmoid(logits)                # (B,)
+        return pi_i                 # π_i ∈ (0,1)
