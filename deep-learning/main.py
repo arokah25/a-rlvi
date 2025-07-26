@@ -533,7 +533,6 @@ def run():
                 )
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
-            print(f"VAL_ACC={val_acc:.4f}%", flush=True)    # Optuna will parse this
             mean_pi_val, frac_extreme = pi_stats(model_features,
                                                 inference_net,
                                                 val_loader,
