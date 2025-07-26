@@ -405,10 +405,10 @@ def run():
 
         scheduler_classifier = OneCycleLR(
                 optim_classifier,
-                max_lr=args.lr_init*30,      
-                div_factor=25.,     
-                final_div_factor=1e5,
-                pct_start=0.05, 
+                max_lr=args.lr_init*10,      
+                div_factor=10.,     
+                final_div_factor=1e4,
+                pct_start=args.warmup_epochs / args.n_epoch, 
                 steps_per_epoch=steps_per_epoch, 
                 epochs=args.n_epoch
             )
