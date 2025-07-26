@@ -56,8 +56,8 @@ def train_arlvi(
     alpha:               float = 0.85,   # EMA momentum for per-class priors
     pi_bar_class:        torch.Tensor | None = None,  # shape [num_classes]
     beta:                float = 0.4,
-    tau:                 float = 0.6,
-    max_gamma:           float = 0.2,  # max attachment of πᵢ on the CE term (after ramp-up)
+    tau:                 float = 1,  # temperature for πᵢ attachment on CE term
+    max_gamma:           float = 1,  # max attachment of πᵢ on the CE term (after ramp-up) is full-attachment for analytical optimality
     scheduler:           Dict[str, torch.optim.lr_scheduler._LRScheduler] | None = None,
     writer=None,
     grad_clip:           float = 2.0,
@@ -145,7 +145,8 @@ def train_arlvi(
         pi_temp   = pi_i ** tau 
 
         # Partial detachment of πᵢ on the CE term with ramp-up
-        gamma_ramp_epochs = 1
+        # max_gamma = 1, full attachment of πᵢ on CE after ramp-up
+        gamma_ramp_epochs = 5
         if epoch < warmup_epochs:
             gamma = 0.0  # full detachment during warm-up
         else:
@@ -160,15 +161,17 @@ def train_arlvi(
         weighted_ce_loss = (ce_weight * ce_loss).mean()  
 
         # Entropy regulariser – linearly annealed β
-        decay_start, decay_len = 4, 14
-        beta_now = beta * max(0.1, 1 - max(epoch - decay_start, 0) / decay_len)
+        decay_start, decay_len = 4, 10
+        beta_floor = 0.05 # non-zero floor for β to keep ∥∇φ∥ alive
+        beta_now = beta * max(beta_floor, 1 - max(epoch - decay_start, 0) / decay_len) # anneal β from beta to beta_floor (0.4 → 0.05)
         entropy_reg = beta_now * (-(pi_i * torch.log(pi_i + eps) +
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
 
         # Rubber-band λ_KL schedule (2.0 → λ over 15 epochs after warm-up)
-        decay_rate   = (2.0 - lambda_kl) / 15.0
-        kl_lambda    = 2.0 - decay_rate * max(epoch - warmup_epochs, 0)
-        kl_lambda    = max(lambda_kl, kl_lambda)
+        #decay_rate   = (2.0 - lambda_kl) / 15.0
+        #kl_lambda    = 2.0 - decay_rate * max(epoch - warmup_epochs, 0)
+        #kl_lambda    = max(lambda_kl, kl_lambda)
+        kl_lambda = lambda_kl # temporarily use fixed λ_KL for testing
 
         total_batch_loss = weighted_ce_loss + kl_lambda * mean_kl - entropy_reg
 
