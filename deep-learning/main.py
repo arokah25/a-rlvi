@@ -21,6 +21,8 @@ from models.lenet import LeNetDO
 from models.resnet import ResNet18DO, ResNet34DO
 import warnings
 warnings.filterwarnings("ignore", message=".*intraop threads.*")
+import importlib, amortized.inference_net
+importlib.reload(amortized.inference_net)
 from amortized.inference_net import InferenceNet
 
 
