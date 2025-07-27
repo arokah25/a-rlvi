@@ -143,7 +143,7 @@ def train_arlvi(
         # Inference network predicts πᵢ; gradients flow only after warm-up
         # --------------------------------------------------------------
         with torch.set_grad_enabled(epoch >= warmup_epochs):
-            pi_raw = inference_net(z_i, ctx=None)           # unconstrained in (0,1)
+            pi_raw = inference_net(z_i)           # unconstrained in (0,1)
 
         # Soft squashing so πᵢ ∈ (0.05,0.95) and ramp-up keeps early grads alive
         #ramp_T = 6
@@ -326,7 +326,7 @@ def train_arlvi(
 
     print(
         f"[ep {epoch:03d}] "
-        f"acc {train_acc*100:5.1f}% │ "
+        f"train_acc {train_acc*100:5.1f}% │ "
         f"CE {avg_ce_loss:.4f} KL {avg_kl_loss:.4f} Ent {avg_entropy_reg:.4f} │ "
         f"γ {gamma:.2f} λ_KL {kl_lambda:.2f} │ "
         f"LR bbk {lr_bbk:.2e} cls {lr_cls:.2e} │ "
