@@ -535,6 +535,11 @@ def run():
                     writer              = writer,
                     grad_clip           = 5.0
                 )
+            print(
+            f"[ep {epoch:03d}]  train {train_acc*100:5.1f}% │ "
+            f"val {val_acc*100:5.1f}% │ test {test_acc*100:5.1f}%"
+            )
+            
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             mean_pi_val, frac_extreme = pi_stats(model_features,
