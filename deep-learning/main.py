@@ -62,6 +62,8 @@ parser.add_argument('--debug', action='store_true',
                     help='Print debugging information during training')
 
 
+
+
 args = parser.parse_args()
 
 #Tensorboard logging (for RLVI and ARLVI)
@@ -379,7 +381,7 @@ def run():
     # Adam’s normalisation smooths those fluctuations
     optim_classifier = torch.optim.AdamW(
             classifier_params, 
-            lr=args.lr_init * 30,  # 30x larger than backbone
+            lr=args.lr_init * 10,  # 10x larger than backbone
             weight_decay=5e-4
         )
 
@@ -511,7 +513,7 @@ def run():
         elif args.method == "arlvi":
             # --- Train ARLVI ---
             start_time = time.time()
-            ce_loss, kl_loss, train_acc, pi_bar_class, pi_hist_data = methods.train_arlvi(
+            ce_loss, kl_loss, train_acc, pi_bar_class = methods.train_arlvi(
                     model_features      = model_features,
                     model_classifier    = model_classifier,
                     inference_net       = inference_net,
@@ -543,9 +545,6 @@ def run():
 
 
             # --- Log metrics ---
-            writer.add_scalar("Loss/CE_weighted", ce_loss, epoch)
-            writer.add_scalar("Loss/KL",          kl_loss, epoch)
-            writer.add_scalar("Train/Accuracy",   train_acc, epoch)
             writer.add_scalar("Test/Accuracy",    val_acc, epoch)
             writer.add_scalar("Epoch/Time", epoch_time, epoch)
 
