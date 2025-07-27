@@ -23,6 +23,43 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from typing import Dict, Tuple
+import math, time
+
+
+# ---------------------------------------------------------------------
+# TensorBoard helper
+# ---------------------------------------------------------------------
+def tb_log_arlvi(
+        writer,
+        epoch: int,
+        *,
+        ce_loss: float,
+        kl_loss: float,
+        entropy_reg: float,
+        train_acc: float,
+        pi_mean: float,
+        pi_hist: torch.Tensor,           # 1-D tensor of all πᵢ this epoch
+        pi_class_means: Dict[int, float] # {class_id: mean π}
+):
+    """Write metrics to TensorBoard."""
+    # ---- losses ------------------------------------------------------
+    writer.add_scalars("Loss", {
+        "CE_weighted": ce_loss,
+        "KL":          kl_loss,
+        "EntropyReg":  entropy_reg,
+    }, epoch)
+
+    # ---- accuracy ----------------------------------------------------
+    writer.add_scalar("Accuracy/train", train_acc, epoch)
+
+    # ---- πᵢ global stats --------------------------------------------
+    writer.add_scalar("Pi/global_mean", pi_mean, epoch)
+    writer.add_histogram("Pi/distribution", pi_hist, epoch)
+
+    # ---- πᵢ per-class means (no histograms) --------------------------
+    for cls, m in pi_class_means.items():
+        writer.add_scalar(f"Pi/class_mean/{cls:03d}", m, epoch)
+
 
 # -----------------------------------------------------------------------------
 # Helper – closed-form KL divergence between two Bernoulli distributions
@@ -51,21 +88,23 @@ def train_arlvi(
     device:              torch.device,
     epoch:               int,
     lambda_kl:           float = 1.0,
-    pi_bar:              float = 0.75,   # scalar prior used during warm-up
+    pi_bar:              float = 0.85,   # scalar prior used during warm-up
     warmup_epochs:       int   = 2,
     alpha:               float = 0.85,   # EMA momentum for per-class priors
     pi_bar_class:        torch.Tensor | None = None,  # shape [num_classes]
-    beta:                float = 0.2,
-    tau:                 float = 0.6,
+    beta:                float = 0.4,
+    tau:                 float = 1,  # temperature for πᵢ attachment on CE term
+    max_gamma:           float = 1,  # max attachment of πᵢ on the CE term (after ramp-up) is full-attachment for analytical optimality
     scheduler:           Dict[str, torch.optim.lr_scheduler._LRScheduler] | None = None,
     writer=None,
-    grad_clip:           float = 5.0,
-) -> Tuple[float, float, float, torch.Tensor, Dict[str, torch.Tensor]]:
+    grad_clip:           float = 2.0,
+) -> Tuple[float, float, float, torch.Tensor]:
+
     """Train A-RLVI for **one epoch**.
 
     Returns
     -------
-    avg_ce_loss, avg_kl_loss, train_acc, updated_pi_bar_class, histogram_data
+    avg_ce_loss, avg_kl_loss, train_acc, updated_pi_bar_class
     """
 
     # Put all sub-nets into training mode
@@ -75,9 +114,12 @@ def train_arlvi(
 
     # Epoch-level book-keeping
     total_loss = total_ce = total_kl = 0.0
+    entropy_reg_epoch = 0.0
     total_seen = total_correct = 0
     all_pi_values, all_labels = [], []   # for histograms / EMA update
     eps = 1e-8
+    # running sums of per-batch gradient norms (so we can print epoch averages)
+    grad_sum_bbk = grad_sum_cls = grad_sum_inf = 0.0      
 
     # ------------------------------------------------------------------
     # Mini-batch loop
@@ -113,7 +155,8 @@ def train_arlvi(
         # Soft squashing of πᵢ 
         scale  = 0.90                         # width of the open interval
         offset = 0.05                         # left border
-        pi_i   = scale * pi_raw + offset      # pi_raw ∈ (0,1) → pi_i ∈ (0.05,0.95)
+        pi_i   = (scale * pi_raw + offset).clamp(0.1, 0.9)      # pi_raw ∈ (0,1) → pi_i ∈ (0.05,0.95) --> clamp to ensure no examples get completely ignored
+
 
         # Save for histograms of pi_i and EMA updates of per-class priors
         all_pi_values.append(pi_i.detach().cpu())
@@ -140,21 +183,40 @@ def train_arlvi(
         # --------------------------------------------------------------
         ce_loss   = F.cross_entropy(logits, labels, reduction='none')         # [B]
         kl_loss   = compute_kl_divergence(pi_i, prior_value)                  # [B,1]
-        pi_temp   = pi_i ** tau 
-        ce_weight = (pi_temp.detach() * ce_loss).mean()            # detach πᵢ
         mean_kl   = kl_loss.mean()
+        pi_temp   = pi_i ** tau 
+
+        # Partial detachment of πᵢ on the CE term with ramp-up
+        # max_gamma = 1, full attachment of πᵢ on CE after ramp-up
+        gamma_ramp_epochs = 5
+        if epoch < warmup_epochs:
+            gamma = 0.0  # full detachment during warm-up
+        else:
+            # linear ramp to gamma_max over gamma_ramp epochs
+            progress = (epoch - warmup_epochs + 1) / gamma_ramp_epochs
+            gamma = min(max_gamma, progress * max_gamma)
+        
+
+        # -- compute CE weight -----
+        # element-wise weights
+        ce_weight = (1 - gamma) * pi_temp.detach() + gamma * pi_temp   # blend
+        weighted_ce_loss = (ce_weight * ce_loss).mean()  
 
         # Entropy regulariser – linearly annealed β
-        decay_start, decay_len = 12, 22
-        beta_now = beta * max(0, 1 - max(epoch - decay_start, 0) / decay_len)
+        decay_start, decay_len = 4, 10
+        beta_floor = 0.2 
+        beta_now = beta * max(beta_floor, 1 - max(epoch - decay_start, 0) / decay_len) # anneal β from beta to beta_floor (0.4 → 0.05)
         entropy_reg = beta_now * (-(pi_i * torch.log(pi_i + eps) +
                                     (1 - pi_i) * torch.log(1 - pi_i + eps))).mean()
+        entropy_reg_epoch += entropy_reg.item() * B
 
-        # ── Rubber-band schedule 
-        decay_rate   = (2.0 - lambda_kl) / 15.0    # <-- keep as is
-        kl_lambda    = max( 0.7, 2.0 - decay_rate * max(epoch - warmup_epochs, 0) )
 
-        total_batch_loss = ce_weight + kl_lambda * mean_kl - entropy_reg
+        # Rubber-band λ_KL schedule (2.0 → λ over 15 epochs after warm-up)
+        decay_rate   = (3.0 - lambda_kl) / 15
+        kl_lambda    = 3.0 - decay_rate * max(epoch - warmup_epochs, 0)
+        kl_lambda    = max(lambda_kl, kl_lambda)
+
+        total_batch_loss = weighted_ce_loss + kl_lambda * mean_kl - entropy_reg
 
         # --------------------------------------------------------------
         # Back-prop and optimiser / scheduler steps
@@ -168,10 +230,21 @@ def train_arlvi(
             inference_optimizer.zero_grad(set_to_none=True)
 
         total_batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model_features.parameters(),   5.0)
-        torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), 5.0)
+
+        # ── clip & measure gradients ───────────────────────────────────────────
+        grad_bbk = torch.nn.utils.clip_grad_norm_(model_features.parameters(),   5.0).item()
+        grad_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), 5.0).item()
         if epoch >= warmup_epochs:
-            torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip)
+            grad_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip).item()
+        else:                   # inference net is still frozen
+            grad_inf = float("nan")
+
+        # accumulate for epoch-level averages
+        grad_sum_bbk += grad_bbk * B
+        grad_sum_cls += grad_cls * B
+        if not math.isnan(grad_inf):
+            grad_sum_inf += grad_inf * B
+
 
         # Optimisers step
         # Note: inference and classifier optimizers are only updated after warm-up
@@ -189,59 +262,12 @@ def train_arlvi(
         # Running aggregates
         # --------------------------------------------------------------
         total_loss   += total_batch_loss.item() * B
-        total_ce     += ce_weight.item() * B
+        total_ce     += weighted_ce_loss.item() * B
         total_kl     += mean_kl.item() * B
         total_seen   += B
         total_correct += logits.argmax(1).eq(labels).sum().item()
 
-        # --------------------------------------------------------------
-        # Diagnostics every 500 batches
-        # --------------------------------------------------------------
-        if batch_idx % 500 == 0:
-            # --- entropy of πᵢ in current batch
-            entropy_val = (-(pi_i * torch.log(pi_i + eps) + (1 - pi_i) * torch.log(1 - pi_i + eps))).mean().item()
 
-            # --- prior range
-            if pi_bar_class is not None:
-                pi_bar_min = pi_bar_class.min().item()
-                pi_bar_max = pi_bar_class.max().item()
-            else:
-                pi_bar_min = pi_bar_max = pi_bar
-
-            # --- identify cleanest / noisiest class in *this* batch
-            with torch.no_grad():
-                batch_means = {}
-                for cls in labels.unique():
-                    cls_mask = labels == cls
-                    batch_means[int(cls)] = pi_i[cls_mask].mean().item()
-                sorted_batch = sorted(batch_means.items(), key=lambda kv: kv[1])
-                top_noisy, top_clean = sorted_batch[0][0], sorted_batch[-1][0]
-
-            # --- gradient norms + LRs
-            grad_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), float('inf')).item()
-            grad_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf')).item()
-            grad_bbk = torch.nn.utils.clip_grad_norm_(model_features.parameters(), float('inf')).item()
-            lr_bbk   = optim_bbk.param_groups[0]['lr']
-            lr_cls   = optim_cls.param_groups[0]['lr']
-
-            # Optional TensorBoard scalar logging per batch
-            if writer is not None:
-                step = epoch * len(dataloader) + batch_idx
-                writer.add_scalar('LR/backbone', lr_bbk, step)
-                writer.add_scalar('LR/classifier', lr_cls, step)
-                writer.add_scalar('GradNorm/Inference', grad_inf, step)
-                writer.add_scalar('GradNorm/Classifier', grad_cls, step)
-
-            # Console debug print
-            print(
-                f"[Ep {epoch:02d} Bt {batch_idx:04d}] "
-                f"πᵢ batch_μ={pi_i.mean():.3f} batch_min={pi_i.min():.2f} batch_max={pi_i.max():.2f} "
-                f"batch_entropy={entropy_val:.2f} "
-                f"pī_c∈[{pi_bar_min:.2f},{pi_bar_max:.2f}] "
-                f"cleanest_cls={top_clean:03d} noisiest_cls={top_noisy:03d} "
-                f"CE={ce_weight.item():.3f} KL={mean_kl.item():.3f} "
-                f"|∇φ|={grad_inf:.2f} |∇θcls|={grad_cls:.2f} |∇θbbk|={grad_bbk:.2f} "
-                f"lr_cls={lr_cls:.6f} lr_bbk={lr_bbk:.6f}")
 
     # ------------------------------------------------------------------
     # End-of-epoch updates – EMA for class priors + scalar prior update
@@ -257,32 +283,73 @@ def train_arlvi(
                 pi_cls_mean = all_pi_cat[mask].mean().to(device)
                 pi_bar_class[cls] = alpha * pi_bar_class[cls] + (1 - alpha) * pi_cls_mean
 
-    mean_pi_i = torch.cat(all_pi_values).mean().item() # overall mean πᵢ in epoch
-
+    # ------------------------------------------------------------------
     avg_ce_loss = total_ce / total_seen
     avg_kl_loss = total_kl / total_seen
     train_acc   = total_correct / total_seen
+    avg_entropy_reg = entropy_reg_epoch / total_seen
 
-    # TensorBoard epoch-level scalars / histograms
+    # ------------------------------------------------------------------
+    # Build global + per-class π statistics for logging
+    # ------------------------------------------------------------------
+    all_pi_cat     = torch.cat(all_pi_values)   # shape [N]
+    all_labels_cat = torch.cat(all_labels)      # shape [N]
+
+    pi_mean_global = all_pi_cat.mean().item()
+
+    pi_class_means: Dict[int, float] = {}
+    if pi_bar_class is not None:
+        for cls in range(pi_bar_class.size(0)):
+            mask = (all_labels_cat == cls)
+            if mask.any():
+                pi_class_means[cls] = all_pi_cat[mask].mean().item()
+
+
+
+    # ───────────────────────────────────────────────────────────────────────
+    # Compact console print – one line per epoch (easy hyper-param tuning)
+    # ───────────────────────────────────────────────────────────────────────
+    lr_bbk = optimizer['backbone'].param_groups[0]['lr']
+    lr_cls = optimizer['classifier'].param_groups[0]['lr']
+
+    kl_lambda = max(lambda_kl,
+                    3.0 - (3.0 - lambda_kl) / 15 * max(epoch - warmup_epochs, 0))
+    gamma = 0.0 if epoch < warmup_epochs else min(max_gamma,
+            (epoch - warmup_epochs + 1) / 5 * max_gamma)
+
+    pi_p10, pi_p50, pi_p90 = torch.quantile(all_pi_cat,
+                                            torch.tensor([.10, .50, .90])).tolist()
+
+    grad_bbk_epoch = grad_sum_bbk / total_seen
+    grad_cls_epoch = grad_sum_cls / total_seen
+    grad_inf_epoch = grad_sum_inf / total_seen if grad_sum_inf > 0 else float("nan")
+
+    print(
+        f"[ep {epoch:03d}] "
+        f"train_acc {train_acc*100:5.1f}% │ "
+        f"CE {avg_ce_loss:.4f} KL {avg_kl_loss:.4f} Ent {avg_entropy_reg:.4f} │ "
+        f"γ {gamma:.2f} λ_KL {kl_lambda:.2f} │ "
+        f"LR bbk {lr_bbk:.2e} cls {lr_cls:.2e} │ "
+        f"|∇| bbk {grad_bbk_epoch:.2f} cls {grad_cls_epoch:.2f} inf {grad_inf_epoch:.2f} │ "
+        f"πᵢ μ {pi_mean_global:.2f} p10/p50/p90 {pi_p10:.2f}/{pi_p50:.2f}/{pi_p90:.2f}"
+    )
+
+
+
+    # ------------------------------------------------------------------
+    # TensorBoard logging  (if writer was passed in)
+    # ------------------------------------------------------------------
     if writer is not None:
-        writer.add_scalar('Loss/CE_weighted', avg_ce_loss, epoch)
-        writer.add_scalar('Loss/KL',          avg_kl_loss, epoch)
-        writer.add_scalar('Inference/pi_i_mean', mean_pi_i, epoch)
-        if epoch % 3 == 0:
-            writer.add_histogram(f'Inference/PiDistribution epoch {epoch}', torch.cat(all_pi_values), epoch)
+        tb_log_arlvi(
+            writer, epoch,
+            ce_loss       = avg_ce_loss,
+            kl_loss       = avg_kl_loss,
+            entropy_reg   = avg_entropy_reg,      # epoch-average value
+            train_acc     = train_acc,
+            pi_mean       = pi_mean_global,
+            pi_hist       = all_pi_cat,
+            pi_class_means= pi_class_means,
+        )
+        writer.flush()
 
-    # Histogram data  – only keep for cleanest/noisiest classes for caller plotting
-    hist_data: Dict[str, torch.Tensor] = {}
-    if epoch % 3 == 0 and pi_bar_class is not None:
-        cls_order = pi_bar_class.detach().cpu().numpy().argsort()
-        cleanest  = cls_order[-5:]
-        noisiest  = cls_order[:5]
-        all_pi_cat     = torch.cat(all_pi_values)
-        all_labels_cat = torch.cat(all_labels)
-        for tag, cls_ids in [('cleanest', cleanest), ('noisiest', noisiest)]:
-            for c in cls_ids:
-                mask = (all_labels_cat == c)
-                if mask.any():
-                    hist_data[f'{tag}_cls_{c}'] = all_pi_cat[mask]
-
-    return avg_ce_loss, avg_kl_loss, train_acc, pi_bar_class, hist_data
+    return avg_ce_loss, avg_kl_loss, train_acc, pi_bar_class
