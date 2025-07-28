@@ -24,6 +24,7 @@ warnings.filterwarnings("ignore", message=".*intraop threads.*")
 import importlib, amortized.inference_net
 importlib.reload(amortized.inference_net)
 from amortized.inference_net import InferenceNet
+from torch.amp import GradScaler
 
 
 
@@ -83,7 +84,7 @@ if torch.backends.mps.is_available():
 
 elif torch.cuda.is_available():
     DEVICE = torch.device("cuda")
-    scaler = torch.cuda.amp.GradScaler()   # <- mixed-precision helper
+    scaler = GradScaler(device_type="cuda")   # <- mixed-precision helper
 
 else:
     DEVICE = torch.device("cpu")
@@ -332,7 +333,7 @@ def run():
                                                drop_last=False,
                                                shuffle=True,
                                                pin_memory=True,
-                                               prefetch_factor=4)
+                                               prefetch_factor=2)
     
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
                                             batch_size=args.batch_size,
@@ -340,7 +341,7 @@ def run():
                                             drop_last=False,
                                             shuffle=False,
                                             pin_memory=True,
-                                            prefetch_factor=4)
+                                            prefetch_factor=2)
 
     
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
@@ -613,7 +614,7 @@ def run():
 
         # Log info
         time_ep = time.time() - time_ep
-        test_acc = utils.evaluate(test_loader, model)
+        #test_acc = utils.evaluate(test_loader, model)
 
         # Print log-table
         if (epoch + 1) % args.print_freq == 0:
