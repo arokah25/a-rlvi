@@ -56,7 +56,7 @@ def tb_log_arlvi(
     writer.add_scalar("Pi/global_mean", pi_mean, epoch)
     writer.add_histogram("Pi/distribution", pi_hist, epoch)
 
-    # ---- πᵢ per-class means (no histograms) --------------------------
+    # ---- πᵢ per-class means --------------------------
     for cls, m in pi_class_means.items():
         writer.add_scalar(f"Pi/class_mean/{cls:03d}", m, epoch)
 
@@ -79,6 +79,7 @@ def compute_kl_divergence(pi_i: torch.Tensor, pi_bar: torch.Tensor) -> torch.Ten
 
 def train_arlvi(
     *,
+    scaler: torch.cuda.amp.GradScaler | None = None,
     model_features:      torch.nn.Module,
     model_classifier:    torch.nn.Module,
     inference_net:       torch.nn.Module,
@@ -136,14 +137,15 @@ def train_arlvi(
         # model_classifier: classifier (e.g., linear layer) predicts logits
         # z_i: shape [B, d] where d is the feature dimension (e.g., 2048 for ResNet50)
         # logits: shape [B, num_classes] – class predictions
-        z_i = model_features(images).view(B, -1) # [B, d]
-        logits = model_classifier(z_i) # [B, num_classes]
+        with torch.cuda.amp.autocast(enabled=scaler is not None):     
+            z_i = model_features(images).view(B, -1) # [B, d]
+            logits = model_classifier(z_i) # [B, num_classes]
 
         # --------------------------------------------------------------
         # Inference network predicts πᵢ; gradients flow only after warm-up
         # --------------------------------------------------------------
-        with torch.set_grad_enabled(epoch >= warmup_epochs):
-            pi_raw = inference_net(z_i)           # unconstrained in (0,1)
+            with torch.set_grad_enabled(epoch >= warmup_epochs):
+                pi_raw = inference_net(z_i)           # unconstrained in (0,1)
 
         # Soft squashing so πᵢ ∈ (0.05,0.95) and ramp-up keeps early grads alive
         #ramp_T = 6
@@ -212,8 +214,8 @@ def train_arlvi(
 
 
         # Rubber-band λ_KL schedule (2.0 → λ over 15 epochs after warm-up)
-        decay_rate   = (3.0 - lambda_kl) / 15
-        kl_lambda    = 3.0 - decay_rate * max(epoch - warmup_epochs, 0)
+        decay_rate   = (1.5 - lambda_kl) / 40
+        kl_lambda    = 2 - decay_rate * max(epoch - warmup_epochs, 0)
         kl_lambda    = max(lambda_kl, kl_lambda)
 
         total_batch_loss = weighted_ce_loss + kl_lambda * mean_kl - entropy_reg
@@ -229,45 +231,41 @@ def train_arlvi(
         if epoch >= warmup_epochs:
             inference_optimizer.zero_grad(set_to_none=True)
 
-        total_batch_loss.backward()
+        # ----- backward ----------------------------------------------------
+        if scaler is not None:
+            scaler.scale(total_batch_loss).backward()
+        else:
+            total_batch_loss.backward()
 
-        # ── clip & measure gradients ───────────────────────────────────────────
+        # ----- unscale before clipping ------------------------------------
+        if scaler is not None:
+            scaler.unscale_(optim_bbk)
+            scaler.unscale_(optim_cls)
+            if epoch >= warmup_epochs:
+                scaler.unscale_(inference_optimizer)
+
         grad_bbk = torch.nn.utils.clip_grad_norm_(model_features.parameters(),   5.0).item()
         grad_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), 5.0).item()
-        if epoch >= warmup_epochs:
-            grad_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip).item()
-        else:                   # inference net is still frozen
-            grad_inf = float("nan")
-
-        # accumulate for epoch-level averages
+        grad_inf = (torch.nn.utils.clip_grad_norm_(inference_net.parameters(), grad_clip).item()
+                    if epoch >= warmup_epochs else float('nan'))
         grad_sum_bbk += grad_bbk * B
         grad_sum_cls += grad_cls * B
         if not math.isnan(grad_inf):
             grad_sum_inf += grad_inf * B
 
 
-        # Optimisers step
-        # Note: inference and classifier optimizers are only updated after warm-up
-        optim_bbk.step()
-        if epoch >= warmup_epochs:
-            optim_cls.step()
-            inference_optimizer.step()
-
-        # Scheduler step after optimiser step (PyTorch recommendation)
-        if scheduler is not None:
-            scheduler['backbone'].step()
-            scheduler['classifier'].step()
-
-        # --------------------------------------------------------------
-        # Running aggregates
-        # --------------------------------------------------------------
-        total_loss   += total_batch_loss.item() * B
-        total_ce     += weighted_ce_loss.item() * B
-        total_kl     += mean_kl.item() * B
-        total_seen   += B
-        total_correct += logits.argmax(1).eq(labels).sum().item()
-
-
+        # ----- optimiser step ---------------------------------------------
+        if scaler is not None:
+            scaler.step(optim_bbk)
+            if epoch >= warmup_epochs:
+                scaler.step(optim_cls)
+                scaler.step(inference_optimizer)
+            scaler.update()
+        else:
+            optim_bbk.step()
+            if epoch >= warmup_epochs:
+                optim_cls.step()
+                inference_optimizer.step()
 
     # ------------------------------------------------------------------
     # End-of-epoch updates – EMA for class priors + scalar prior update
@@ -304,6 +302,16 @@ def train_arlvi(
             if mask.any():
                 pi_class_means[cls] = all_pi_cat[mask].mean().item()
 
+    # -----------------------------------------------------------
+    #  π̄_c   per-class EMA statistics we also want to track
+    # -----------------------------------------------------------
+    if pi_bar_class is not None:
+        # tensor on device ➞ CPU scalar numbers
+        pi_class_min = pi_bar_class.min().item()
+        pi_class_med = pi_bar_class.median().item()
+        pi_class_max = pi_bar_class.max().item()
+    else:                       # warm-up → treat as NaNs
+        pi_class_min = pi_class_med = pi_class_max = float('nan')
 
 
     # ───────────────────────────────────────────────────────────────────────
@@ -326,12 +334,13 @@ def train_arlvi(
 
     print(
         f"[ep {epoch:03d}] "
-        f"train_acc {train_acc*100:5.1f}% │ "
         f"CE {avg_ce_loss:.4f} KL {avg_kl_loss:.4f} Ent {avg_entropy_reg:.4f} │ "
         f"γ {gamma:.2f} λ_KL {kl_lambda:.2f} │ "
         f"LR bbk {lr_bbk:.2e} cls {lr_cls:.2e} │ "
         f"|∇| bbk {grad_bbk_epoch:.2f} cls {grad_cls_epoch:.2f} inf {grad_inf_epoch:.2f} │ "
         f"πᵢ μ {pi_mean_global:.2f} p10/p50/p90 {pi_p10:.2f}/{pi_p50:.2f}/{pi_p90:.2f}"
+        f"π̄c min/med/max {pi_class_min:.2f}/{pi_class_med:.2f}/{pi_class_max:.2f}"
+
     )
 
 
