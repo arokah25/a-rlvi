@@ -126,7 +126,7 @@ def train_arlvi(
     # ------------------------------------------------------------------
     # Mini-batch loop
     # ------------------------------------------------------------------
-    for batch_idx, (images, labels, *_) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch:03d}", leave=False)):        # Move batch to device
+    for batch_idx, (images, labels, *_) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch:03d}", leave=False)):
         images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         B = images.size(0) # batch size
 
@@ -266,6 +266,16 @@ def train_arlvi(
             if epoch >= warmup_epochs:
                 optim_cls.step()
                 inference_optimizer.step()
+        
+        # ──────────────────────────────────────────────────────────────
+        # running-sum bookkeeping
+        # ──────────────────────────────────────────────────────────────
+        total_loss   += total_batch_loss.item() * B
+        total_ce     += weighted_ce_loss.item()  * B
+        total_kl     += mean_kl.item()           * B
+        total_seen   += B
+        total_correct += logits.argmax(1).eq(labels).sum().item()
+        # ──────────────────────────────────────────────────────────────
 
         # ---------------- batch-level DEBUG (every 100 mini-batches) ---------
         if batch_idx % 100 == 0:
@@ -348,9 +358,8 @@ def train_arlvi(
         f"γ {gamma:.2f} λ_KL {kl_lambda:.2f} │ "
         f"LR bbk {lr_bbk:.2e} cls {lr_cls:.2e} │ "
         f"|∇| bbk {grad_bbk_epoch:.2f} cls {grad_cls_epoch:.2f} inf {grad_inf_epoch:.2f} │ "
-        f"πᵢ μ {pi_mean_global:.2f} p10/p50/p90 {pi_p10:.2f}/{pi_p50:.2f}/{pi_p90:.2f}"
+        f"πᵢ μ {pi_mean_global:.2f} p10/p50/p90 {pi_p10:.2f}/{pi_p50:.2f}/{pi_p90:.2f} │ "
         f"π̄c min/med/max {pi_class_min:.2f}/{pi_class_med:.2f}/{pi_class_max:.2f}"
-
     )
 
 
