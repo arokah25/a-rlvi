@@ -24,7 +24,8 @@ warnings.filterwarnings("ignore", message=".*intraop threads.*")
 import importlib, amortized.inference_net
 importlib.reload(amortized.inference_net)
 from amortized.inference_net import InferenceNet
-from torch.amp import GradScaler
+from torch.cuda.amp import GradScaler
+
 
 
 
@@ -85,6 +86,7 @@ if torch.backends.mps.is_available():
 elif torch.cuda.is_available():
     DEVICE = torch.device("cuda")
     scaler = GradScaler(device_type="cuda")   # <- mixed-precision helper
+
 
 else:
     DEVICE = torch.device("cpu")
