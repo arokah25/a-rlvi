@@ -538,7 +538,7 @@ def run():
                     alpha               = args.ema_alpha,
                     pi_bar_class        = pi_bar_class,           # running tensor
                     beta                = args.beta_entropy_reg,
-                    tau                 = 0.6,                    # leave default
+                    tau                 = 1,                    # leave default
                     scheduler           = schedulers,             # ← pass the dict
                     writer              = writer,
                     grad_clip           = 5.0
