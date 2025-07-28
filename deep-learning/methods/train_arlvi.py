@@ -23,6 +23,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from typing import Dict, Tuple
+from tqdm import tqdm
 import math, time
 
 
@@ -125,8 +126,7 @@ def train_arlvi(
     # ------------------------------------------------------------------
     # Mini-batch loop
     # ------------------------------------------------------------------
-    for batch_idx, (images, labels, *_) in enumerate(dataloader):
-        # Move batch to device
+    for batch_idx, (images, labels, *_) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch:03d}", leave=False)):        # Move batch to device
         images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         B = images.size(0) # batch size
 
@@ -137,7 +137,7 @@ def train_arlvi(
         # model_classifier: classifier (e.g., linear layer) predicts logits
         # z_i: shape [B, d] where d is the feature dimension (e.g., 2048 for ResNet50)
         # logits: shape [B, num_classes] – class predictions
-        with torch.cuda.amp.autocast(enabled=scaler is not None):     
+        with torch.amp.autocast(device_type='cuda', enabled=(scaler is not None)):
             z_i = model_features(images).view(B, -1) # [B, d]
             logits = model_classifier(z_i) # [B, num_classes]
 
@@ -266,6 +266,16 @@ def train_arlvi(
             if epoch >= warmup_epochs:
                 optim_cls.step()
                 inference_optimizer.step()
+
+        # ---------------- batch-level DEBUG (every 100 mini-batches) ---------
+        if batch_idx % 100 == 0:
+            tqdm.write(                                   # <-- correct call
+                f"[ep {epoch:03d} | bt {batch_idx:04d}] "
+                f"CE={weighted_ce_loss.item():.4f}  "
+                f"KL={mean_kl.item():.4f}  "
+                f"πᵢ μ={pi_i.mean().item():.2f}"
+            )
+        # --------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # End-of-epoch updates – EMA for class priors + scalar prior update
