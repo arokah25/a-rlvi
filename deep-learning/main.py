@@ -85,7 +85,7 @@ if torch.backends.mps.is_available():
 
 elif torch.cuda.is_available():
     DEVICE = torch.device("cuda")
-    scaler = GradScaler(device_type="cuda")   # <- mixed-precision helper
+    scaler = GradScaler()   # <- mixed-precision helper
 
 
 else:
