@@ -79,10 +79,17 @@ writer    = SummaryWriter(log_dir=log_dir)
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
+    scaler = None                         # no CUDA ⇒ stay full FP32
+
 elif torch.cuda.is_available():
     DEVICE = torch.device("cuda")
+    scaler = torch.cuda.amp.GradScaler()   # <- mixed-precision helper
+
 else:
     DEVICE = torch.device("cpu")
+    scaler = None                         
+
+
 
 
 # Seed
@@ -399,7 +406,7 @@ def run():
 
         scheduler_backbone = OneCycleLR(
                 optim_backbone,
-                max_lr=args.lr_init * 10,      
+                max_lr=args.lr_init * 5,      
                 div_factor=10.,      
                 final_div_factor=1e4,
                 pct_start=args.warmup_epochs / args.n_epoch, 
@@ -516,6 +523,7 @@ def run():
             # --- Train ARLVI ---
             start_time = time.time()
             ce_loss, kl_loss, train_acc, pi_bar_class = methods.train_arlvi(
+                    scaler              = scaler,                 # mixed-precision scaler
                     model_features      = model_features,
                     model_classifier    = model_classifier,
                     inference_net       = inference_net,
@@ -539,7 +547,7 @@ def run():
             f"[ep {epoch:03d}]  train {train_acc*100:5.1f}% │ "
             f"val {val_acc*100:5.1f}% │ test {test_acc*100:5.1f}%"
             )
-            
+
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             mean_pi_val, frac_extreme = pi_stats(model_features,
