@@ -56,7 +56,7 @@ def tb_log_arlvi(
     writer.add_scalar("Pi/global_mean", pi_mean, epoch)
     writer.add_histogram("Pi/distribution", pi_hist, epoch)
 
-    # ---- πᵢ per-class means (no histograms) --------------------------
+    # ---- πᵢ per-class means --------------------------
     for cls, m in pi_class_means.items():
         writer.add_scalar(f"Pi/class_mean/{cls:03d}", m, epoch)
 
@@ -302,6 +302,16 @@ def train_arlvi(
             if mask.any():
                 pi_class_means[cls] = all_pi_cat[mask].mean().item()
 
+    # -----------------------------------------------------------
+    #  π̄_c   per-class EMA statistics we also want to track
+    # -----------------------------------------------------------
+    if pi_bar_class is not None:
+        # tensor on device ➞ CPU scalar numbers
+        pi_class_min = pi_bar_class.min().item()
+        pi_class_med = pi_bar_class.median().item()
+        pi_class_max = pi_bar_class.max().item()
+    else:                       # warm-up → treat as NaNs
+        pi_class_min = pi_class_med = pi_class_max = float('nan')
 
 
     # ───────────────────────────────────────────────────────────────────────
@@ -324,12 +334,13 @@ def train_arlvi(
 
     print(
         f"[ep {epoch:03d}] "
-        f"train_acc {train_acc:5.1f}% │ "
         f"CE {avg_ce_loss:.4f} KL {avg_kl_loss:.4f} Ent {avg_entropy_reg:.4f} │ "
         f"γ {gamma:.2f} λ_KL {kl_lambda:.2f} │ "
         f"LR bbk {lr_bbk:.2e} cls {lr_cls:.2e} │ "
         f"|∇| bbk {grad_bbk_epoch:.2f} cls {grad_cls_epoch:.2f} inf {grad_inf_epoch:.2f} │ "
         f"πᵢ μ {pi_mean_global:.2f} p10/p50/p90 {pi_p10:.2f}/{pi_p50:.2f}/{pi_p90:.2f}"
+        f"π̄c min/med/max {pi_class_min:.2f}/{pi_class_med:.2f}/{pi_class_max:.2f}"
+
     )
 
 
