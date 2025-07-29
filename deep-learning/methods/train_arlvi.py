@@ -161,7 +161,7 @@ def train_arlvi(
 
 
         # Save for histograms of pi_i and EMA updates of per-class priors
-        all_pi_values.append(pi_i.detach().cpu())
+        all_pi_values.append(pi_i.detach().cpu()).float()  # detach from graph, move to CPU, convert to float
         all_labels.append(labels.detach().cpu())
 
         # --------------------------------------------------------------
@@ -335,7 +335,7 @@ def train_arlvi(
 
 
     # ───────────────────────────────────────────────────────────────────────
-    # Compact console print – one line per epoch (easy hyper-param tuning)
+    # Console print – one line per epoch (hyper-param tuning)
     # ───────────────────────────────────────────────────────────────────────
     lr_bbk = optimizer['backbone'].param_groups[0]['lr']
     lr_cls = optimizer['classifier'].param_groups[0]['lr']
@@ -365,7 +365,7 @@ def train_arlvi(
 
 
     # ------------------------------------------------------------------
-    # TensorBoard logging  (if writer was passed in)
+    # TensorBoard logging
     # ------------------------------------------------------------------
     if writer is not None:
         tb_log_arlvi(
