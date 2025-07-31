@@ -25,6 +25,10 @@ import importlib, amortized.inference_net
 importlib.reload(amortized.inference_net)
 from amortized.inference_net import InferenceNet
 from torch.cuda.amp import GradScaler
+from train_arlvi_vanilla import train_arlvi_vanilla
+
+
+
 
 
 
@@ -34,11 +38,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--result_dir', type=str, help = 'dir to save result txt files', default='results/')
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
-parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
+parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, arlvi_vanilla, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 
 ###---for A-RLVI stabilization---###
-parser.add_argument('--lambda_kl', type=float, default=1.0,
-                    help='Weight for the KL divergence regularization term')
+parser.add_argument('--update_inference_every', type=str, choices=['batch', 'epoch'], default='batch')
+parser.add_argument('--beta', type=float, default=1.0,
+                    help='Weight for the KL divergence regularization term (vanilla A-RLVI)')
+
 parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.90)
@@ -403,7 +409,7 @@ def run():
 
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
-    if args.method == 'arlvi':
+    if args.method in ['arlvi', 'arlvi_vanilla']:
         # total number of batches per epoch:
         steps_per_epoch = len(train_loader)
 
@@ -579,6 +585,33 @@ def run():
                     overfit = (val_acc < 0.5 * (val_acc_old + val_acc_old_old))
                 val_acc_old_old = val_acc_old
                 val_acc_old = val_acc
+
+        elif args.method == "arlvi_vanilla":
+            start_time = time.time()
+
+            ce_loss, kl_loss, train_acc = train_arlvi_vanilla(
+                model_features         = model_features,
+                model_classifier       = model_classifier,
+                inference_net          = inference_net,
+                dataloader             = train_loader,
+                optim_backbone         = optim_backbone,
+                optim_classifier       = optim_classifier,
+                optim_inference        = optimizer_inf,
+                device                 = DEVICE,
+                epoch                  = epoch,
+                beta                   = args.beta,
+                update_inference_every = args.update_inference_every,
+                writer                 = writer,           # optional TensorBoard
+            )
+
+            epoch_time = time.time() - start_time
+            val_acc  = utils.evaluate(val_loader,  model)
+            test_acc = utils.evaluate(test_loader, model)
+
+            writer.add_scalar("Epoch/Time",   epoch_time, epoch)
+            writer.add_scalar("Val/Accuracy",  val_acc,   epoch)
+            writer.add_scalar("Test/Accuracy", test_acc,  epoch)
+
 
         elif args.method == 'coteaching':
             model_sec.train()
