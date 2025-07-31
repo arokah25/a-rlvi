@@ -296,8 +296,10 @@ if args.forget_rate is None:
         forget_rate /= 2.
 else:
     forget_rate = args.forget_rate
+num_gradual = min(args.num_gradual, args.n_epoch)
 rate_schedule = np.ones(args.n_epoch) * forget_rate
-rate_schedule[:args.num_gradual] = np.linspace(0, forget_rate**args.exponent, args.num_gradual)
+rate_schedule[:num_gradual] = np.linspace(0, forget_rate**args.exponent, num_gradual)
+
 
 
 # Prepare a structured output
@@ -588,7 +590,7 @@ def run():
         elif args.method == "arlvi_vanilla":
             start_time = time.time()
 
-            ce_loss, kl_loss, train_acc = train_arlvi_vanilla(
+            ce_loss, kl_loss, train_acc = methods.train_arlvi_vanilla(
                 model_features         = model_features,
                 model_classifier       = model_classifier,
                 inference_net          = inference_net,
