@@ -25,7 +25,6 @@ import importlib, amortized.inference_net
 importlib.reload(amortized.inference_net)
 from amortized.inference_net import InferenceNet
 from torch.cuda.amp import GradScaler
-from train_arlvi_vanilla import train_arlvi_vanilla
 
 
 
@@ -361,7 +360,7 @@ def run():
                                               prefetch_factor=4)
 
     # Prepare ARLVI*Food101 models and optimizers
-    if args.dataset == 'food101' and args.method == 'arlvi':
+    if args.dataset == 'food101' and args.method in ['arlvi', 'arlvi_vanilla']:
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
         #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
