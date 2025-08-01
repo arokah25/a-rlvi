@@ -243,17 +243,23 @@ if args.dataset == "food101":
     input_channel = 3
     num_classes = 101
 
-    # in main.py, Food101 transform block
+    ###----------------------------------------------
+    # Food101 transform data block: 
+    ###----------------------------------------------
+
+    # Normalize using per-channel means and stds of imageNet training set
+    # ResNet50 was trained on ImageNet with this exact normalization
+    # Apply so that inputs aren't out of distribution for the pretrained model
     normalize = transforms.Normalize([0.485,0.456,0.406],
                                     [0.229,0.224,0.225])
 
     transform_train = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.5,1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(0.4,0.4,0.4,0.2),
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
         transforms.ToTensor(),
         normalize,
     ])
+
     transform_test = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
