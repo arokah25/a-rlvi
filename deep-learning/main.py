@@ -599,15 +599,15 @@ def run():
             hist_pi_max.append(float(diag.get('pi_max', 0.0)))
             hist_pi_mean.append(float(diag.get('pi_mean', 0.0)))
 
+            train_acc = utils.get_accuracy(train_loader, model)
             val_acc = utils.evaluate(val_loader, model)
-            test_acc = utils.evaluate(test_loader, model)
 
             print(
                 f"[ep {epoch:03d}] "
                 f"CE={hist_ce[-1]:.3f} KL={hist_kl[-1]:.3f} | "
                 f"∥g∥ bb={hist_grad_bb[-1]:.3f} cls={hist_grad_cls[-1]:.3f} inf={hist_grad_inf[-1]:.3f} | "
                 f"π μ={hist_pi_mean[-1]:.3f} min={hist_pi_min[-1]:.2f} max={hist_pi_max[-1]:.2f} | "
-                f"val={val_acc*100:.2f}% test={test_acc*100:.2f}%"
+                f"train_acc={train_acc:.2f}% val_acc={val_acc:.2f}%"
             )
 
 
