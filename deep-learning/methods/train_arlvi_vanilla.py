@@ -17,15 +17,13 @@
 # ==============================================================
 
 from __future__ import annotations
-import torch
-import torch.nn.functional as F
+import torch, torch.nn.functional as F
 from typing import Dict, Tuple
 from tqdm import tqdm
 
 # -----------------------------------------------------------------------------
 # Utility: KL( Bern(π) ‖ Bern(π̄) ) element-wise for matching shapes
 # -----------------------------------------------------------------------------
-
 def kl_bern(pi: torch.Tensor, pi_bar: torch.Tensor) -> torch.Tensor:
     """Numerically-stable KL divergence between two Bernoulli parameters."""
     eps = 1e-6
@@ -36,7 +34,6 @@ def kl_bern(pi: torch.Tensor, pi_bar: torch.Tensor) -> torch.Tensor:
 # -----------------------------------------------------------------------------
 # Main training routine (single epoch)
 # -----------------------------------------------------------------------------
-
 def train_arlvi_vanilla(
     *,
     model_features:   torch.nn.Module,          # backbone   (θ_bb)
@@ -51,51 +48,49 @@ def train_arlvi_vanilla(
     beta:             float = 1.0,              # <-- single hyper-parameter!
     update_inference_every: str = "batch",      # 'batch' | 'epoch'
     clamp_min:        float = 0.05,             # keep π in (clamp_min, 1-clamp_min)
-    writer=None,                                # optional TensorBoard
     return_diag:      bool  = False,            # return diagnostic dict if True
+    log_every:        int   = 200,               # mini-batch console logging
 ) -> Tuple[float, float, float] | Tuple[float, float, float, Dict[str, float]]:
     """Train A-RLVI for one epoch.
 
     Returns
     -------
-    ce_epoch, kl_epoch, accuracy_epoch  [, diag]
+    (CE_avg, KL_avg, acc_avg)            – default
+    (CE_avg, KL_avg, acc_avg, diag)      – if return_diag=True
     """
 
     # ------------------------------------------------------
-    # Set all nets to train mode
+    # Put nets in train mode
     # ------------------------------------------------------
     model_features.train()
     model_classifier.train()
     inference_net.train()
 
     # ------------------------------------------------------
-    # Running totals for epoch-level stats
+    # Running sums
     # ------------------------------------------------------
     ce_sum = kl_sum = 0.0
     n_seen = n_correct = 0
 
-    # For gradient-norm logging (sum over mini-batches)
-    grad_norm_bb_sum = grad_norm_cls_sum = grad_norm_inf_sum = 0.0
-    n_batches = 0                                         # <-- count batches
+    grad_bb_sum = grad_cls_sum = 0.0          # accumulate batch means
+    grad_inf_sum, n_inf_batches = 0.0, 0      # keep separate counter
 
-    # π-sampling buffer (capped for memory safety)
-    pi_samples: list[torch.Tensor] = []
-    pi_sample_cap = 20_000   # total scalar samples per epoch
+    # π sampling buffer (memory-safe)
+    pi_samples, pi_cap = [], 20_000
 
-    # Zero grads beforehand if we do once-per-epoch update
+    # Zero grads in once-per-epoch mode
     if update_inference_every == "epoch":
         optim_inference.zero_grad(set_to_none=True)
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     # Mini-batch loop
-    # ------------------------------------------------------------------
-    for images, labels, *_ in tqdm(dataloader, desc=f"Epoch {epoch:03d}"):
+    # ------------------------------------------------------
+    for b_idx, (images, labels, *_) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch:03d}")):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         B      = images.size(0)
-        n_batches += 1
 
-        # ---------------------------- forward -------------------------
+        # ---------- forward ------------------------------------------
         with torch.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
             z_i    = model_features(images).view(B, -1)
             logits = model_classifier(z_i)
@@ -106,7 +101,7 @@ def train_arlvi_vanilla(
 
             loss   = (pi_i * ce_vec).mean() + beta * kl_vec.mean()
 
-        # --------------------------- backward ------------------------
+        # ---------- backward -----------------------------------------
         for opt in (optim_backbone, optim_classifier):
             opt.zero_grad(set_to_none=True)
         if update_inference_every == "batch":
@@ -114,79 +109,63 @@ def train_arlvi_vanilla(
 
         loss.backward()
 
-        # ------------- optimisation steps ---------------------------
         optim_backbone.step()
         optim_classifier.step()
         if update_inference_every == "batch":
             optim_inference.step()
 
-        # ---------------- running stats -----------------------------
+        # ---------- stats --------------------------------------------
         ce_sum += (pi_i * ce_vec).sum().item()
         kl_sum += kl_vec.sum().item()
         n_seen += B
-        n_correct += logits.argmax(dim=1).eq(labels).sum().item()
+        n_correct += logits.argmax(1).eq(labels).sum().item()
 
-        # ------ gradient norms (per-batch, no B-scaling) ------------
-        grad_norm_bb_sum  += sum(p.grad.norm().item()
-                                 for p in model_features.parameters()   if p.grad is not None)
-        grad_norm_cls_sum += sum(p.grad.norm().item()
-                                 for p in model_classifier.parameters() if p.grad is not None)
+        # grad norms (per-batch means, not scaled by B)
+        grad_bb_batch  = sum(p.grad.norm().item() for p in model_features.parameters()   if p.grad is not None)
+        grad_cls_batch = sum(p.grad.norm().item() for p in model_classifier.parameters() if p.grad is not None)
+        grad_bb_sum  += grad_bb_batch
+        grad_cls_sum += grad_cls_batch
+
         if update_inference_every == "batch":
-            grad_norm_inf_sum += sum(p.grad.norm().item()
-                                     for p in inference_net.parameters() if p.grad is not None)
+            grad_inf_batch = sum(p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None)
+            grad_inf_sum   += grad_inf_batch
+            n_inf_batches  += 1
 
-        # ----------- light π diagnostics (bounded) ------------------
+        # lightweight π sampling
         ps = pi_i.detach().flatten().cpu()
-        if ps.numel() and sum(t.numel() for t in pi_samples) < pi_sample_cap:
+        if ps.numel() and sum(t.numel() for t in pi_samples) < pi_cap:
             pi_samples.append(ps[: min(1024, ps.numel())])
 
-    # ------------------------------------------------------------------
-    # One-shot optimisation of inference net if it was frozen all epoch
-    # ------------------------------------------------------------------
+        # ---------- optional per-batch console log -------------------
+        if (b_idx + 1) % log_every == 0:
+            tqdm.write(f"  ↳ bt {b_idx:04d}: loss={loss.item():.3f} "
+                       f"CE={ce_vec.mean():.3f} KL={kl_vec.mean():.3f}")
+
+    # ------------------------------------------------------
+    # One-shot inference-net update  (epoch mode)
+    # ------------------------------------------------------
     if update_inference_every == "epoch":
         optim_inference.step()
-        grad_norm_inf_sum = sum(p.grad.norm().item()
-                                for p in inference_net.parameters() if p.grad is not None)
+        grad_inf_sum   = sum(p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None)
+        n_inf_batches  = 1                         # only one update this epoch
 
-    # ------------------------------------------------------------------
-    # Epoch-level averages
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
+    # Averages
+    # ------------------------------------------------------
     ce_epoch  = ce_sum / n_seen
     kl_epoch  = kl_sum / n_seen
     acc_epoch = n_correct / n_seen
 
-    grad_bb  = grad_norm_bb_sum  / n_batches     # average per mini-batch
-    grad_cls = grad_norm_cls_sum / n_batches
-    grad_inf = grad_norm_inf_sum / n_batches
+    grad_bb  = grad_bb_sum  / len(dataloader)
+    grad_cls = grad_cls_sum / len(dataloader)
+    grad_inf = grad_inf_sum / max(1, n_inf_batches)
 
-    # ------------------------------------------------------------------
-    # Console log
-    # ------------------------------------------------------------------
-    print(
-        f"[ep {epoch:03d}] "
-        f"CE {ce_epoch:.4f} | KL {kl_epoch:.4f} | β {beta:.2f} | "
-        f"|∇| bbk {grad_bb:.2f} cls {grad_cls:.2f} inf {grad_inf:.2f} | "
-        f"acc {acc_epoch:.2%}"
-    )
 
-    # ------------------------------------------------------------------
-    # TensorBoard (optional)
-    # ------------------------------------------------------------------
-    if writer is not None:
-        writer.add_scalars("Loss", {"CE_weighted": ce_epoch, "KL": kl_epoch}, epoch)
-        writer.add_scalars("GradNorm", {
-            "backbone":   grad_bb,
-            "classifier": grad_cls,
-            "inference":  grad_inf,
-        }, epoch)
-        writer.add_scalar("Accuracy/train", acc_epoch, epoch)
-        writer.flush()
-
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     # Diagnostics dict
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     if pi_samples:
-        pi_cat  = torch.cat(pi_samples)
+        pi_cat = torch.cat(pi_samples)
         pi_diag = {
             "pi_min":  float(pi_cat.min()),
             "pi_max":  float(pi_cat.max()),
@@ -202,11 +181,11 @@ def train_arlvi_vanilla(
         **pi_diag,
     }
 
-    # Preserve backward-compatibility
     if return_diag:
         return ce_epoch, kl_epoch, acc_epoch, diag
     else:
         return ce_epoch, kl_epoch, acc_epoch
+
 # -----------------------------------------------------------------------------
 # End of file – keep this module small so theory experiments are painless
 # -----------------------------------------------------------------------------
