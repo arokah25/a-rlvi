@@ -25,6 +25,9 @@ import importlib, amortized.inference_net
 importlib.reload(amortized.inference_net)
 from amortized.inference_net import InferenceNet
 from torch.cuda.amp import GradScaler
+import matplotlib.pyplot as plt
+from math import sqrt
+
 
 
 
@@ -74,14 +77,11 @@ parser.add_argument('--debug', action='store_true',
 
 
 args = parser.parse_args()
+# --- histories for plotting ---
+hist_ce, hist_kl = [], []
+hist_grad_bb, hist_grad_cls, hist_grad_inf = [], [], []
+hist_pi_min, hist_pi_max, hist_pi_mean = [], [], []
 
-#Tensorboard logging (for RLVI and ARLVI)
-from torch.utils.tensorboard import SummaryWriter
-# write into your result_dir so logs persist in Drive
-timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-log_dir   = os.path.join(args.result_dir, 'tensorboard', args.dataset, args.method, timestamp)
-os.makedirs(log_dir, exist_ok=True)
-writer    = SummaryWriter(log_dir=log_dir)
 
 
 if torch.backends.mps.is_available():
@@ -118,6 +118,14 @@ def pi_stats(model_features, inference_net, loader, device):
     extreme   = ((pi < 0.2) | (pi > 0.8)).float().mean().item()
     return mean_pi, extreme
 
+@torch.no_grad()
+def collect_all_pi(model_features, inference_net, loader, device):
+    inference_net.eval()
+    out = []
+    for imgs, *_ in loader:
+        z = model_features(imgs.to(device, non_blocking=True)).flatten(1)
+        out.append(inference_net(z).cpu())
+    return torch.cat(out, dim=0)  # [N,] or [N,1]
 
 
 """# Load datasets for training, validation, and testing
@@ -519,21 +527,14 @@ def run():
             # --- Train RLVI ---
             train_acc, threshold, train_loss = methods.train_rlvi(
             train_loader, model, optimizer,
-            residuals, sample_weights, overfit, threshold,
-            writer=writer, epoch=epoch
+            residuals, sample_weights, overfit, threshold, 
+            writer=None, epoch=epoch
             )
 
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             test_acc = utils.evaluate(test_loader, model)
-            # --- Log RLVI metrics ---
-            writer.add_scalar("Loss/Total", train_loss, epoch)
-            writer.add_scalar("Epoch/Time", epoch_time, epoch)
-            writer.add_scalar("Train/Accuracy", train_acc, epoch)
-            writer.add_scalar("Test/Accuracy", val_acc, epoch)
-            if args.dataset != "food101":
-                writer.add_scalar("Test/Accuracy", test_acc, epoch)
-
+            
             
         elif args.method == "arlvi":
             # --- Train ARLVI ---
@@ -556,33 +557,10 @@ def run():
                     beta                = args.beta_entropy_reg,
                     tau                 = 1,                    # leave default
                     scheduler           = schedulers,             # ← pass the dict
-                    writer              = writer,
-                    grad_clip           = 5.0
-                )
-            print(
-            f"[ep {epoch:03d}]  train {train_acc:5.1f}% │ "
-            f"val {val_acc*100:5.1f}% │ test {test_acc:5.1f}%"
+                    grad_clip           = 5.0,
             )
-
-            epoch_time = time.time() - start_time
-            val_acc = utils.evaluate(val_loader, model)
-            mean_pi_val, frac_extreme = pi_stats(model_features,
-                                                inference_net,
-                                                val_loader,
-                                                DEVICE)
-            writer.add_scalar("Val/MeanPi",        mean_pi_val,   epoch)
-            writer.add_scalar("Val/FracExtremePi", frac_extreme,  epoch)
-
-
-
-            # --- Log metrics ---
-            writer.add_scalar("Test/Accuracy",    val_acc, epoch)
-            writer.add_scalar("Epoch/Time", epoch_time, epoch)
-
-
-            # Skip this line if dataset is Food101:
-            if args.dataset != "food101":
-                writer.add_scalar("Test/Accuracy", test_acc, epoch)
+            
+            
 
 
             # Check if overfitting has started
@@ -596,7 +574,7 @@ def run():
         elif args.method == "arlvi_vanilla":
             start_time = time.time()
 
-            ce_loss, kl_loss, train_acc = methods.train_arlvi_vanilla(
+            ce_loss, kl_loss, train_acc, diag = methods.train_arlvi_vanilla(
                 model_features         = model_features,
                 model_classifier       = model_classifier,
                 inference_net          = inference_net,
@@ -608,16 +586,29 @@ def run():
                 epoch                  = epoch,
                 beta                   = args.beta,
                 update_inference_every = args.update_inference_every,
-                writer                 = writer,           # optional TensorBoard
+                return_diag            = True
             )
 
-            epoch_time = time.time() - start_time
-            val_acc  = utils.evaluate(val_loader,  model)
+            # histories + console print
+            hist_ce.append(float(ce_loss))
+            hist_kl.append(float(kl_loss))
+            hist_grad_bb.append(float(diag.get('grad_backbone', 0.0)))
+            hist_grad_cls.append(float(diag.get('grad_classifier', 0.0)))
+            hist_grad_inf.append(float(diag.get('grad_inference', 0.0)))
+            hist_pi_min.append(float(diag.get('pi_min', 0.0)))
+            hist_pi_max.append(float(diag.get('pi_max', 0.0)))
+            hist_pi_mean.append(float(diag.get('pi_mean', 0.0)))
+
+            val_acc = utils.evaluate(val_loader, model)
             test_acc = utils.evaluate(test_loader, model)
 
-            writer.add_scalar("Epoch/Time",   epoch_time, epoch)
-            writer.add_scalar("Val/Accuracy",  val_acc,   epoch)
-            writer.add_scalar("Test/Accuracy", test_acc,  epoch)
+            print(
+                f"[ep {epoch:03d}] "
+                f"CE={hist_ce[-1]:.3f} KL={hist_kl[-1]:.3f} | "
+                f"∥g∥ bb={hist_grad_bb[-1]:.3f} cls={hist_grad_cls[-1]:.3f} inf={hist_grad_inf[-1]:.3f} | "
+                f"π μ={hist_pi_mean[-1]:.3f} min={hist_pi_min[-1]:.2f} max={hist_pi_max[-1]:.2f} | "
+                f"val={val_acc*100:.2f}% test={test_acc*100:.2f}%"
+            )
 
 
         elif args.method == 'coteaching':
@@ -679,9 +670,35 @@ def run():
             myfile.write(f"{int(epoch)}:\t{time_ep:.2f}\t{threshold:.2f}\t{overfit}\t"
                          + f"{clean*100:.2f}\t{corr*100:.2f}\t"
                          + f"{train_acc:8.4f}\t{val_acc:8.4f}\t{test_acc:8.4f}\n")
-    
-#To close the TensorBoard writer
-writer.close()
+
+    # <<< ADD THIS WHOLE BLOCK AFTER THE FOR-LOOP, STILL INSIDE run() >>>
+    plot_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    # Losses
+    plt.figure()
+    plt.plot(hist_ce, label='CE (avg/epoch)')
+    plt.plot(hist_kl, label='KL (avg/epoch)')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('CE & KL'); plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, 'losses_ce_kl.png'), dpi=150); plt.close()
+
+    # Grad norms
+    plt.figure()
+    plt.plot(hist_grad_bb,  label='Backbone ∥g∥')
+    plt.plot(hist_grad_cls, label='Classifier ∥g∥')
+    plt.plot(hist_grad_inf, label='Inference ∥g∥')
+    plt.xlabel('Epoch'); plt.ylabel('RMS grad norm'); plt.title('Gradients'); plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, 'grad_norms.png'), dpi=150); plt.close()
+
+    # π histogram (final)
+    if args.method in ['arlvi', 'arlvi_vanilla']:
+        pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
+        plt.figure()
+        plt.hist(pi_all, bins=50, range=(0.0, 1.0))
+        plt.xlabel('π'); plt.ylabel('Count'); plt.title('π histogram (final)'); plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, 'pi_histogram.png'), dpi=150); plt.close()
+
+    print(f"Saved plots to: {plot_dir}")
 
 
 if __name__ == '__main__':
