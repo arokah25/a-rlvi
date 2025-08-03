@@ -64,6 +64,28 @@ class Food101(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.indices)
 
+# ------------------------------------------------------------------
+# Food-101 LMDB wrapper – compatible with (img, label, index) API
+# ------------------------------------------------------------------
+import lmdb, pickle, io
+class Food101LMDB(torch.utils.data.Dataset):
+    def __init__(self, lmdb_path, transform=None):
+        self.env = lmdb.open(lmdb_path, readonly=True, lock=False,
+                             readahead=False, meminit=False)
+        with self.env.begin() as txn:
+            self.keys   = pickle.loads(txn.get(b'__keys__'))
+            self.length = pickle.loads(txn.get(b'__len__'))
+        self.transform = transform
+
+    def __len__(self): return self.length
+
+    def __getitem__(self, idx):
+        with self.env.begin() as txn:
+            buf = txn.get(self.keys[idx])
+        img_bytes, label = pickle.loads(buf)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        if self.transform: img = self.transform(img)
+        return img, label, idx
 
 
 
