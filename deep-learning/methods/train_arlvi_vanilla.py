@@ -99,7 +99,8 @@ def train_arlvi_vanilla(
             ce_vec = F.cross_entropy(logits, labels, reduction="none")
             kl_vec = kl_bern(pi_i, torch.full_like(pi_i, 0.75))
 
-            loss   = (pi_i * ce_vec).mean() + beta * kl_vec.mean()
+            loss = ((pi_i * ce_vec).mean() + beta * kl_vec.mean())
+
 
         # ---------- backward -----------------------------------------
         for opt in (optim_backbone, optim_classifier):
@@ -145,9 +146,17 @@ def train_arlvi_vanilla(
     # One-shot inference-net update  (epoch mode)
     # ------------------------------------------------------
     if update_inference_every == "epoch":
+        # Manually scale the accumulated gradients of ϕ by 1 / len(dataloader)
+        for p in inference_net.parameters():
+            if p.grad is not None:
+                p.grad.div_(len(dataloader))  # average over all batches
+
         optim_inference.step()
-        grad_inf_sum   = sum(p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None)
-        n_inf_batches  = 1                         # only one update this epoch
+
+        # Diagnostics: compute grad norm for inference net
+        grad_inf_sum  = sum(p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None)
+        n_inf_batches = 1
+
 
     # ------------------------------------------------------
     # Averages
