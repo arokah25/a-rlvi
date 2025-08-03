@@ -304,7 +304,8 @@ if args.dataset == "food101":
         split_per=1.0,
         download=True
     )"""
-# use the pre-built LMDB archives
+# --------- LMDB-backed Food-101 datasets ----------
+
 lmdb_root = os.path.join(args.root_dir, 'food101_lmdb')
 train_dataset = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_train.lmdb'),
                                       transform=transform_train)
@@ -312,7 +313,6 @@ val_dataset   = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_val.lmdb')
                                       transform=transform_test)
 test_dataset  = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_test.lmdb'),
                                       transform=transform_test)
-
 
 
 # For alternative methods:
@@ -525,7 +525,7 @@ def run():
     pi_bar_class = torch.full((101,), 0.75, dtype=torch.float32).to(DEVICE)
 
 
-    for epoch in range(1, args.n_epoch):
+    for epoch in range(1, args.n_epoch + 1):
         model.train()
 
         time_ep = time.time()
