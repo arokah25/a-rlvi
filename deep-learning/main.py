@@ -54,7 +54,7 @@ parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entr
 parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning rate for the inference network (Adam)')
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
-parser.add_argument('--split_percentage', type=float, default=0.1)
+parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.75)
 ###---###
 parser.add_argument('--n_epoch', type=int, help='number of epochs for training', default=80)
 parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
@@ -599,15 +599,17 @@ def run():
             hist_pi_max.append(float(diag.get('pi_max', 0.0)))
             hist_pi_mean.append(float(diag.get('pi_mean', 0.0)))
 
-            train_acc = utils.get_accuracy(train_loader, model)
             val_acc = utils.evaluate(val_loader, model)
+            test_acc = utils.evaluate(test_loader, model)
+            epoch_time = time.time() - start_time
 
             print(
-                f"[ep {epoch:03d}] "
+                f"[ep {epoch:03d}] |"
+                f" time={epoch_time:.2f}s | "
                 f"CE={hist_ce[-1]:.3f} KL={hist_kl[-1]:.3f} | "
                 f"∥g∥ bb={hist_grad_bb[-1]:.3f} cls={hist_grad_cls[-1]:.3f} inf={hist_grad_inf[-1]:.3f} | "
                 f"π μ={hist_pi_mean[-1]:.3f} min={hist_pi_min[-1]:.2f} max={hist_pi_max[-1]:.2f} | "
-                f"train_acc={train_acc:.2f}% val_acc={val_acc:.2f}%"
+                f"train={train_acc:.2f}% val={val_acc:.2f}% test={test_acc:.2f}% " 
             )
 
 
