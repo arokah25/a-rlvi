@@ -146,16 +146,31 @@ def train_arlvi_vanilla(
     # One-shot inference-net update  (epoch mode)
     # ------------------------------------------------------
     if update_inference_every == "epoch":
-        # Manually scale the accumulated gradients of ϕ by 1 / len(dataloader)
-        for p in inference_net.parameters():
-            if p.grad is not None:
-                p.grad.div_(len(dataloader))  # average over all batches
+        # ----------------------------------------------
+        # average accumulated grads  (no autograd)
+        # ----------------------------------------------
+        with torch.no_grad():                     # ← turn off grad tracking
+            scale = 1. / len(dataloader)
+            for p in inference_net.parameters():
+                if p.grad is not None:
+                    p.grad.mul_(scale)         
+                    # optional: clip here, e.g. p.grad.clamp_(-5., 5.)
 
+        # ----------------------------------------------
+        # single optimiser step
+        # ----------------------------------------------
         optim_inference.step()
 
-        # Diagnostics: compute grad norm for inference net
-        grad_inf_sum  = sum(p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None)
+        # ----------------------------------------------
+        #  record grad-norm **before**
+        #     we zero-grad, then clear for next epoch
+        # ----------------------------------------------
+        grad_inf_sum  = sum(
+            p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None
+        )
         n_inf_batches = 1
+        optim_inference.zero_grad(set_to_none=True)   # <- new line
+
 
 
     # ------------------------------------------------------
@@ -194,7 +209,6 @@ def train_arlvi_vanilla(
         return ce_epoch, kl_epoch, acc_epoch, diag
     else:
         return ce_epoch, kl_epoch, acc_epoch
-
 # -----------------------------------------------------------------------------
-# End of file – keep this module small so theory experiments are painless
+# End of train_arlvi_vanilla.py
 # -----------------------------------------------------------------------------
