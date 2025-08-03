@@ -42,7 +42,7 @@ parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', d
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
 parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, arlvi_vanilla, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 
-###---for A-RLVI stabilization---###
+###---for A-RLVI ---###
 parser.add_argument('--update_inference_every', type=str, choices=['batch', 'epoch'], default='batch')
 parser.add_argument('--beta', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term (vanilla A-RLVI)')
@@ -55,6 +55,11 @@ parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning r
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
 parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.75)
+parser.add_argument('--eval_val_every',  type=int, default=1,
+                    help='run val set every N epochs (−1 = never)')
+parser.add_argument('--eval_test_every', type=int, default=1,
+                    help='run test set every N epochs (−1 = never)')
+
 ###---###
 parser.add_argument('--n_epoch', type=int, help='number of epochs for training', default=80)
 parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
@@ -276,7 +281,7 @@ if args.dataset == "food101":
     ])
 
 
-    train_dataset = data_load.Food101(
+"""    train_dataset = data_load.Food101(
         root=args.root_dir,
         split="train",
         transform=transform_train,
@@ -298,7 +303,15 @@ if args.dataset == "food101":
         transform=transform_test,
         split_per=1.0,
         download=True
-    )
+    )"""
+# use the pre-built LMDB archives
+lmdb_root = os.path.join(args.root_dir, 'food101_lmdb')
+train_dataset = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_train.lmdb'),
+                                      transform=transform_train)
+val_dataset   = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_val.lmdb'),
+                                      transform=transform_test)
+test_dataset  = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_test.lmdb'),
+                                      transform=transform_test)
 
 
 
@@ -352,10 +365,11 @@ def run():
     # Data Loaders
     train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
                                                batch_size=args.batch_size,
-                                               num_workers=args.num_workers,
+                                               num_workers=min(args.num_workers, os.cpu_count()),
                                                drop_last=False,
                                                shuffle=True,
                                                pin_memory=True,
+                                               persistent_workers=True,
                                                prefetch_factor=2)
     
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
@@ -599,8 +613,15 @@ def run():
             hist_pi_max.append(float(diag.get('pi_max', 0.0)))
             hist_pi_mean.append(float(diag.get('pi_mean', 0.0)))
 
-            val_acc = utils.evaluate(val_loader, model)
-            test_acc = utils.evaluate(test_loader, model)
+            val_acc  = None
+            test_acc = None
+
+            if args.eval_val_every > 0 and epoch % args.eval_val_every == 0:
+                val_acc = utils.evaluate(val_loader, model)
+
+            if args.eval_test_every > 0 and epoch % args.eval_test_every == 0:
+                test_acc = utils.evaluate(test_loader, model)
+
             epoch_time = time.time() - start_time
 
             print(
