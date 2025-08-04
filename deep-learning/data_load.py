@@ -67,32 +67,67 @@ class Food101(torch.utils.data.Dataset):
 # ------------------------------------------------------------------
 # Food-101 LMDB wrapper – compatible with (img, label, index) API
 # ------------------------------------------------------------------
+# --- replace your Food101LMDB with this version ---
+
 import lmdb, pickle, io
+from PIL import Image
+
 class Food101LMDB(torch.utils.data.Dataset):
     def __init__(self, lmdb_path, transform=None):
-        self.env = lmdb.open(
+        self.lmdb_path = lmdb_path
+        self.transform = transform
+
+        # Read metadata (keys, length) with a short-lived env in the main process.
+        env = lmdb.open(
             lmdb_path,
             readonly=True,
             lock=False,
             readahead=False,
             meminit=False,
-            subdir=False 
+            subdir=False
         )
-        with self.env.begin() as txn:
+        with env.begin() as txn:
             self.keys   = pickle.loads(txn.get(b'__keys__'))
             self.length = pickle.loads(txn.get(b'__len__'))
-        self.transform = transform
+        env.close()
 
-    def __len__(self): return self.length
+        # IMPORTANT: don't keep an Environment opened here.
+        self.env = None
+
+    def _open_env(self):
+        # Called inside worker process on first __getitem__
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+                subdir=False
+            )
+
+    def __len__(self):
+        return self.length
 
     def __getitem__(self, idx):
-        with self.env.begin() as txn:
+        self._open_env()
+        with self.env.begin(buffers=True) as txn:
             buf = txn.get(self.keys[idx])
+        # Optional defensive check:
+        if buf is None:
+            raise KeyError(f"LMDB key not found for idx={idx}. Path={self.lmdb_path}")
         img_bytes, label = pickle.loads(buf)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        if self.transform: img = self.transform(img)
+        if self.transform:
+            img = self.transform(img)
         return img, label, idx
 
+    def __del__(self):
+        try:
+            if self.env is not None:
+                self.env.close()
+        except Exception:
+            pass
 
 
 class Mnist(torch.utils.data.Dataset):
