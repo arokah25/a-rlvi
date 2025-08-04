@@ -281,7 +281,7 @@ if args.dataset == "food101":
     ])
 
 
-"""    train_dataset = data_load.Food101(
+    train_dataset = data_load.Food101(
         root=args.root_dir,
         split="train",
         transform=transform_train,
@@ -303,16 +303,16 @@ if args.dataset == "food101":
         transform=transform_test,
         split_per=1.0,
         download=True
-    )"""
+    )
 # --------- LMDB-backed Food-101 datasets ----------
 
-lmdb_root = os.path.join(args.root_dir, 'food101_lmdb')
+"""lmdb_root = os.path.join(args.root_dir, 'food101_lmdb')
 train_dataset = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_train.lmdb'),
                                       transform=transform_train)
 val_dataset   = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_val.lmdb'),
                                       transform=transform_test)
 test_dataset  = data_load.Food101LMDB(os.path.join(lmdb_root,'food101_test.lmdb'),
-                                      transform=transform_test)
+                                      transform=transform_test)"""
 
 
 # For alternative methods:
