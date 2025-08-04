@@ -370,8 +370,8 @@ def run():
         shuffle=True,
         drop_last=False,
         pin_memory=True,
-        persistent_workers=False,   # <- change to False
-        prefetch_factor=2
+        persistent_workers=True,      # ← missing comma added
+        prefetch_factor=2             # fine because workers>0
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -381,19 +381,18 @@ def run():
         shuffle=False,
         drop_last=False,
         pin_memory=True,
-        persistent_workers=False,  
-        prefetch_factor=2
+        persistent_workers=True,
+        prefetch_factor=2             # fine because workers>0
     )
 
     test_loader = torch.utils.data.DataLoader(
         dataset=test_dataset,
         batch_size=args.batch_size,
-        num_workers=0,              # <- safest for Colab + LMDB
+        num_workers=0,                # single-process loading
         shuffle=False,
         drop_last=False,
-        pin_memory=True,
-        persistent_workers=False, 
-        prefetch_factor=2
+        pin_memory=True               # still helpful if you’re on GPU
+        # persistent_workers / prefetch_factor are ignored when num_workers=0
     )
 
 
