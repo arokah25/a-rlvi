@@ -47,22 +47,20 @@ def output_table(epoch, n_epoch, time_ep=None, train_acc=None, test_acc=None):
 # Evaluate a single model
 def evaluate(test_loader, model):
     model.eval()
-    correct = 0
-    total = 0
-    device = next(model.parameters()).device  # dynamically get the model’s device
+    correct = total = 0
+    device = next(model.parameters()).device
     with torch.no_grad():
-        for images, labels, _ in test_loader:
-            images = images.to(device)
-            labels = labels.to(device)
+        for batch in test_loader:
+            images, labels = batch[:2]  # works for (img,label,...) or (img,label)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             logits = model(images)
-            outputs = F.softmax(logits, dim=1)
-            _, pred = torch.max(outputs.data, 1)
+            _, pred = torch.max(logits, 1)
             total += labels.size(0)
             correct += (pred == labels).sum().item()
+    return 100.0 * correct / total
 
-    acc = 100 * float(correct) / float(total)
-    return acc
 
 
 
