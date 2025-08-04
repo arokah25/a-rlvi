@@ -362,32 +362,41 @@ def run():
     train_acc = 0.0
     val_acc = 0.0
     test_acc = 0.0
-    # Data Loaders
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                               batch_size=args.batch_size,
-                                               num_workers=min(args.num_workers, os.cpu_count()),
-                                               drop_last=False,
-                                               shuffle=True,
-                                               pin_memory=True,
-                                               persistent_workers=True,
-                                               prefetch_factor=2)
-    
-    val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
-                                            batch_size=args.batch_size,
-                                            num_workers=args.num_workers,
-                                            drop_last=False,
-                                            shuffle=False,
-                                            pin_memory=True,
-                                            prefetch_factor=2)
+        # Data Loaders
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_dataset,
+        batch_size=args.batch_size,
+        num_workers=min(args.num_workers, os.cpu_count()),
+        shuffle=True,
+        drop_last=False,
+        pin_memory=True,
+        persistent_workers=False,   # <- change to False
+        prefetch_factor=2
+    )
 
-    
-    test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                              batch_size=args.batch_size,
-                                              num_workers=args.num_workers,
-                                              drop_last=False,
-                                              shuffle=False,
-                                              pin_memory=True,
-                                              prefetch_factor=4)
+    val_loader = torch.utils.data.DataLoader(
+        dataset=val_dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        shuffle=False,
+        drop_last=False,
+        pin_memory=True,
+        persistent_workers=False,  
+        prefetch_factor=2
+    )
+
+    test_loader = torch.utils.data.DataLoader(
+        dataset=test_dataset,
+        batch_size=args.batch_size,
+        num_workers=0,              # <- safest for Colab + LMDB
+        shuffle=False,
+        drop_last=False,
+        pin_memory=True,
+        persistent_workers=False, 
+        prefetch_factor=2
+    )
+
+
 
     # Prepare ARLVI*Food101 models and optimizers
     if args.dataset == 'food101' and args.method in ['arlvi', 'arlvi_vanilla']:
