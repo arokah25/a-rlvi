@@ -27,6 +27,8 @@ from amortized.inference_net import InferenceNet
 from torch.cuda.amp import GradScaler
 import matplotlib.pyplot as plt
 from math import sqrt
+torch.backends.cudnn.benchmark = True
+
 
 
 
@@ -47,6 +49,12 @@ parser.add_argument('--update_inference_every', type=str, choices=['batch', 'epo
 parser.add_argument('--beta', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term (vanilla A-RLVI)')
 
+parser.add_argument('--download', dest='download', action='store_true',
+                    help='Download dataset if not present')
+parser.add_argument('--no-download', dest='download', action='store_false',
+                    help='Do not download dataset')
+parser.set_defaults(download=True)
+
 parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.90)
@@ -55,9 +63,9 @@ parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning r
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
 parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.75)
-parser.add_argument('--eval_val_every',  type=int, default=1,
+parser.add_argument('--eval_val_every',  type=int, default=5,
                     help='run val set every N epochs (−1 = never)')
-parser.add_argument('--eval_test_every', type=int, default=1,
+parser.add_argument('--eval_test_every', type=int, default=-1,
                     help='run test set every N epochs (−1 = never)')
 
 ###---###
@@ -108,7 +116,7 @@ else:
 # Seed
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
-if DEVICE == "cuda":
+if DEVICE.type == "cuda":
     torch.cuda.manual_seed(args.seed)
 
 def pi_stats(model_features, inference_net, loader, device):
@@ -256,6 +264,8 @@ if args.dataset == "food101":
     input_channel = 3
     num_classes = 101
 
+
+
     ###----------------------------------------------
     # Food101 transform data block: 
     ###----------------------------------------------
@@ -280,6 +290,9 @@ if args.dataset == "food101":
         normalize,
     ])
 
+    data_root = os.path.join(args.root_dir, "food-101")
+    if os.path.isdir(data_root):
+        args.download = False  # dataset already staged locally
 
     train_dataset = data_load.Food101(
         root=args.root_dir,
@@ -287,7 +300,7 @@ if args.dataset == "food101":
         transform=transform_train,
         split_per=args.split_percentage,
         random_seed=args.seed,
-        download=True
+        download=args.download
     )
     val_dataset = data_load.Food101(
         root=args.root_dir,
@@ -295,14 +308,14 @@ if args.dataset == "food101":
         transform=transform_test,
         split_per=args.split_percentage,
         random_seed=args.seed,
-        download=True
+        download=args.download
     )
     test_dataset = data_load.Food101(
         root=args.root_dir,
         split="test",          # clean!
         transform=transform_test,
         split_per=1.0,
-        download=True
+        download=args.download
     )
 # --------- LMDB-backed Food-101 datasets ----------
 
@@ -363,37 +376,40 @@ def run():
     val_acc = 0.0
     test_acc = 0.0
         # Data Loaders
+    # Keep this small on Colab until you confirm fast local IO
+    workers = max(1, min(args.num_workers, (os.cpu_count() or 2)//2))
+
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=args.batch_size,
-        num_workers=min(args.num_workers, os.cpu_count()),
+        num_workers=workers,
         shuffle=True,
         drop_last=False,
         pin_memory=True,
-        persistent_workers=True,      # ← missing comma added
-        prefetch_factor=2             # fine because workers>0
+        persistent_workers=False,   # ← let workers die between epochs to avoid long “warmups”
+        prefetch_factor=1           # ← avoid preloading huge batches before you see any logs
     )
 
     val_loader = torch.utils.data.DataLoader(
         dataset=val_dataset,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        num_workers=workers,
         shuffle=False,
         drop_last=False,
         pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2             # fine because workers>0
+        persistent_workers=False,
+        prefetch_factor=1
     )
 
     test_loader = torch.utils.data.DataLoader(
         dataset=test_dataset,
         batch_size=args.batch_size,
-        num_workers=0,                # single-process loading
+        num_workers=0,              # leave single-process for test; it’s fine
         shuffle=False,
         drop_last=False,
-        pin_memory=True               # still helpful if you’re on GPU
-        # persistent_workers / prefetch_factor are ignored when num_workers=0
+        pin_memory=True
     )
+
 
 
 
@@ -510,7 +526,7 @@ def run():
 
 
     # Evaluate init model
-    test_acc = utils.evaluate(test_loader, model)
+    #test_acc = utils.evaluate(test_loader, model)
     utils.output_table(epoch=0, n_epoch=args.n_epoch, test_acc=test_acc)
     with open(txtfile, "a") as myfile:
         myfile.write("epoch:\ttime_ep\ttau\tfix\tclean,%\tcorr,%\ttrain_acc\tval_acc\ttest_acc\n")
@@ -632,13 +648,15 @@ def run():
 
             epoch_time = time.time() - start_time
 
+            v = "—" if val_acc is None else f"{val_acc:.2f}%"
+            t = "—" if test_acc is None else f"{test_acc:.2f}%"
+
             print(
-                f"[ep {epoch:03d}] |"
-                f" time={epoch_time:.2f}s | "
+                f"[ep {epoch:03d}] | time={epoch_time:.2f}s | "
                 f"CE={hist_ce[-1]:.3f} KL={hist_kl[-1]:.3f} | "
                 f"∥g∥ bb={hist_grad_bb[-1]:.3f} cls={hist_grad_cls[-1]:.3f} inf={hist_grad_inf[-1]:.3f} | "
                 f"π μ={hist_pi_mean[-1]:.3f} min={hist_pi_min[-1]:.2f} max={hist_pi_max[-1]:.2f} | "
-                f"train={train_acc:.2f}% val={val_acc:.2f}% test={test_acc:.2f}% " 
+                f"train={train_acc*100:.2f}% val={v} test={t}"
             )
 
 
