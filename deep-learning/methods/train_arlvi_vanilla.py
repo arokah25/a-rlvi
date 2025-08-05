@@ -49,7 +49,7 @@ def train_arlvi_vanilla(
     update_inference_every: str = "batch",      # 'batch' | 'epoch'
     clamp_min:        float = 0.05,             # keep π in (clamp_min, 1-clamp_min)
     return_diag:      bool  = False,            # return diagnostic dict if True
-    log_every:        int   = 200,               # mini-batch console logging
+    log_every:        int   = 200,              # mini-batch console logging
 ) -> Tuple[float, float, float] | Tuple[float, float, float, Dict[str, float]]:
     """Train A-RLVI for one epoch.
 
@@ -92,12 +92,13 @@ def train_arlvi_vanilla(
 
         # ---------- forward ------------------------------------------
         with torch.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
-            z_i    = model_features(images).view(B, -1)
-            logits = model_classifier(z_i)
-            pi_i   = inference_net(z_i).clamp(clamp_min, 1. - clamp_min)
+            z_i    = model_features(images).view(B, -1) # backbone features shape (B, D)
+            logits = model_classifier(z_i) # shape (B, C)
+            pi_i   = inference_net(z_i).clamp(clamp_min, 1. - clamp_min) # shape (B,)
+            pi_bar = pi_i.mean().detach()
 
             ce_vec = F.cross_entropy(logits, labels, reduction="none")
-            kl_vec = kl_bern(pi_i, torch.full_like(pi_i, 0.75))
+            kl_vec = kl_bern(pi_i, torch.full_like(pi_i, pi_bar))
 
             loss = ((pi_i * ce_vec).mean() + beta * kl_vec.mean())
 
@@ -146,31 +147,16 @@ def train_arlvi_vanilla(
     # One-shot inference-net update  (epoch mode)
     # ------------------------------------------------------
     if update_inference_every == "epoch":
-        # ----------------------------------------------
-        # average accumulated grads  (no autograd)
-        # ----------------------------------------------
-        with torch.no_grad():                     # ← turn off grad tracking
-            scale = 1. / len(dataloader)
-            for p in inference_net.parameters():
-                if p.grad is not None:
-                    p.grad.mul_(scale)         
-                    # optional: clip here, e.g. p.grad.clamp_(-5., 5.)
+        # Manually scale the accumulated gradients of ϕ by 1 / len(dataloader)
+        for p in inference_net.parameters():
+            if p.grad is not None:
+                p.grad.div_(len(dataloader))  # average over all batches
 
-        # ----------------------------------------------
-        # single optimiser step
-        # ----------------------------------------------
         optim_inference.step()
 
-        # ----------------------------------------------
-        #  record grad-norm **before**
-        #     we zero-grad, then clear for next epoch
-        # ----------------------------------------------
-        grad_inf_sum  = sum(
-            p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None
-        )
+        # Diagnostics: compute grad norm for inference net
+        grad_inf_sum  = sum(p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None)
         n_inf_batches = 1
-        optim_inference.zero_grad(set_to_none=True)   # <- new line
-
 
 
     # ------------------------------------------------------
@@ -209,6 +195,7 @@ def train_arlvi_vanilla(
         return ce_epoch, kl_epoch, acc_epoch, diag
     else:
         return ce_epoch, kl_epoch, acc_epoch
+
 # -----------------------------------------------------------------------------
-# End of train_arlvi_vanilla.py
+# End of file – keep this module small so theory experiments are painless
 # -----------------------------------------------------------------------------
