@@ -138,10 +138,11 @@ def train_arlvi_vanilla(
         if ps.numel() and sum(t.numel() for t in pi_samples) < pi_cap:
             pi_samples.append(ps[: min(1024, ps.numel())])
 
-        # ---------- optional per-batch console log -------------------
+        # ---------- per-batch console log -------------------
         if (b_idx + 1) % log_every == 0:
             tqdm.write(f"  ↳ bt {b_idx:04d}: loss={loss.item():.3f} "
-                       f"CE={ce_vec.mean():.3f} KL={kl_vec.mean():.3f}")
+                       f"CE={ce_vec.mean():.3f} KL={kl_vec.mean():.3f}"
+                       f"<pi>={pi_bar:.3f} ")
 
     # ------------------------------------------------------
     # One-shot inference-net update  (epoch mode)
