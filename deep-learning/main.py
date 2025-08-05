@@ -715,11 +715,11 @@ def run():
             clean, corr = utils.get_ratio_corrupted(mask, train_dataset.noise_mask)
 
         # Save logs to the file
-        with open(txtfile, "a") as myfile:
+        """with open(txtfile, "a") as myfile:
             myfile.write(f"{int(epoch)}:\t{time_ep:.2f}\t{threshold:.2f}\t{overfit}\t"
                          + f"{clean*100:.2f}\t{corr*100:.2f}\t"
                          + f"{train_acc:8.4f}\t{val_acc:8.4f}\t{test_acc:8.4f}\n")
-
+"""
     # <<< ADD THIS WHOLE BLOCK AFTER THE FOR-LOOP, STILL INSIDE run() >>>
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
