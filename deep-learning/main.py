@@ -63,7 +63,7 @@ parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning r
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
 parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.75)
-parser.add_argument('--eval_val_every',  type=int, default=5,
+parser.add_argument('--eval_val_every',  type=int, default=1,
                     help='run val set every N epochs (−1 = never)')
 parser.add_argument('--eval_test_every', type=int, default=-1,
                     help='run test set every N epochs (−1 = never)')
