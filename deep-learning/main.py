@@ -527,10 +527,10 @@ def run():
 
     # Evaluate init model
     #test_acc = utils.evaluate(test_loader, model)
-    utils.output_table(epoch=0, n_epoch=args.n_epoch, test_acc=test_acc)
-    with open(txtfile, "a") as myfile:
-        myfile.write("epoch:\ttime_ep\ttau\tfix\tclean,%\tcorr,%\ttrain_acc\tval_acc\ttest_acc\n")
-        myfile.write(f"0:\t0\t0\t{False}\t100\t0\t0\t0\t{test_acc:8.4f}\n")
+    #utils.output_table(epoch=0, n_epoch=args.n_epoch, test_acc=test_acc)
+    #with open(txtfile, "a") as myfile:
+    #    myfile.write("epoch:\ttime_ep\ttau\tfix\tclean,%\tcorr,%\ttrain_acc\tval_acc\ttest_acc\n")
+    #    myfile.write(f"0:\t0\t0\t{False}\t100\t0\t0\t0\t{test_acc:8.4f}\n")
 
  
     #initialize inference network for ARLVI
