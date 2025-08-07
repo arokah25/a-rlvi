@@ -45,7 +45,7 @@ def train_arlvi_vanilla(
     optim_inference:  torch.optim.Optimizer,
     device:           torch.device,
     epoch:            int,
-    beta:             float = 1.0,              # <-- single hyper-parameter!
+    beta:             float = 0.75,             # <-- single hyper-parameter!
     update_inference_every: str = "batch",      # 'batch' | 'epoch'
     clamp_min:        float = 0.05,             # keep π in (clamp_min, 1-clamp_min)
     return_diag:      bool  = False,            # return diagnostic dict if True
@@ -95,10 +95,10 @@ def train_arlvi_vanilla(
             z_i    = model_features(images).view(B, -1) # backbone features shape (B, D)
             logits = model_classifier(z_i) # shape (B, C)
             pi_i   = inference_net(z_i).clamp(clamp_min, 1. - clamp_min) # shape (B,)
-            pi_bar = pi_i.mean().detach()
+            #pi_bar = pi_i.mean().detach()
 
             ce_vec = F.cross_entropy(logits, labels, reduction="none")
-            kl_vec = kl_bern(pi_i, torch.full_like(pi_i, pi_bar))
+            kl_vec = kl_bern(pi_i, torch.full_like(pi_i, 0.98))
 
             loss = ((pi_i * ce_vec).mean() + beta * kl_vec.mean())
 
@@ -142,7 +142,11 @@ def train_arlvi_vanilla(
         if (b_idx + 1) % log_every == 0:
             tqdm.write(f"  ↳ bt {b_idx:04d}: loss={loss.item():.3f} "
                        f"CE={ce_vec.mean():.3f} KL={kl_vec.mean():.3f}"
-                       f"<pi>={pi_bar:.3f} ")
+                       f"  | grad_bb={grad_bb_batch:.3f} "
+                       f"grad_cls={grad_cls_batch:.3f} "
+                       f"grad_inf={grad_inf_batch:.3f} "
+                       f"π_min={pi_i.min():.3f} "
+                          f"π_max={pi_i.max():.3f} ")
 
     # ------------------------------------------------------
     # One-shot inference-net update  (epoch mode)
@@ -198,5 +202,5 @@ def train_arlvi_vanilla(
         return ce_epoch, kl_epoch, acc_epoch
 
 # -----------------------------------------------------------------------------
-# End of file – keep this module small so theory experiments are painless
+# End of file
 # -----------------------------------------------------------------------------
