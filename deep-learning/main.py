@@ -45,6 +45,8 @@ parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food
 parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, arlvi_vanilla, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 
 ###---for A-RLVI ---###
+parser.add_argument('--tau', type=float, default=1.0,
+                    help='temperature for detached target q_i(τ)')
 parser.add_argument('--update_inference_every', type=str, choices=['batch', 'epoch'], default='batch')
 parser.add_argument('--beta', type=float, default=1.0,
                     help='Weight for the KL divergence regularization term (vanilla A-RLVI)')
@@ -57,7 +59,7 @@ parser.set_defaults(download=True)
 
 parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
-parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.90)
+parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
 parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.05)
 parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning rate for the inference network (Adam)')
 parser.add_argument('--lr_init', type=float, default=1e-3,
@@ -610,8 +612,6 @@ def run():
                 val_acc_old = val_acc
 
         elif args.method == "arlvi_vanilla":
-            start_time = time.time()
-
             ce_loss, kl_loss, train_acc, diag = methods.train_arlvi_vanilla(
                 model_features         = model_features,
                 model_classifier       = model_classifier,
@@ -622,10 +622,12 @@ def run():
                 optim_inference        = optimizer_inf,
                 device                 = DEVICE,
                 epoch                  = epoch,
-                beta                   = args.beta,
                 update_inference_every = args.update_inference_every,
+                tau                    = args.tau,
+                ema_alpha              = args.ema_alpha,
                 return_diag            = True
             )
+
 
             # histories + console print
             hist_ce.append(float(ce_loss))
