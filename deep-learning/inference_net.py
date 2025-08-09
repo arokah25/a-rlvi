@@ -59,7 +59,7 @@ class InferenceNet(nn.Module):
         with torch.no_grad():
             self.fc2.bias.fill_(torch.logit(torch.tensor(init_pi)))
 
-        # (Optional) You can add weight norm to fc2 for extra stability:
+        # (Perhaps) add weight norm to fc2 for extra stability:
         # self.fc2 = nn.utils.weight_norm(self.fc2)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
