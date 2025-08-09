@@ -612,6 +612,8 @@ def run():
                 val_acc_old = val_acc
 
         elif args.method == "arlvi_vanilla":
+            start_time = time.time()
+            # --- Train vanilla A-RLVI ---
             ce_loss, kl_loss, train_acc, diag = methods.train_arlvi_vanilla(
                 model_features         = model_features,
                 model_classifier       = model_classifier,
