@@ -1,4 +1,13 @@
-# A-RLVI implementation
+
+#A-RLVI implementation
+### ---------------------------------------------------------------------------
+from __future__ import annotations  # postpone evaluation of type hints (safer)
+from typing import Optional
+
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+
 # -----------------------------------------------------------------------------
 # Utility: KL( Bern(π) ‖ Bern(π̄) ) element-wise
 # -----------------------------------------------------------------------------
