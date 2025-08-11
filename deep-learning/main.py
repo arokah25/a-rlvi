@@ -28,6 +28,8 @@ from torch.cuda.amp import GradScaler
 import matplotlib.pyplot as plt
 from math import sqrt
 torch.backends.cudnn.benchmark = True
+from torchvision.transforms import InterpolationMode
+
 
 
 
@@ -64,10 +66,10 @@ parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entr
 parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning rate for the inference network (Adam)')
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
-parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.75)
+parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.95)
 parser.add_argument('--eval_val_every',  type=int, default=1,
                     help='run val set every N epochs (−1 = never)')
-parser.add_argument('--eval_test_every', type=int, default=-1,
+parser.add_argument('--eval_test_every', type=int, default=1,
                     help='run test set every N epochs (−1 = never)')
 
 ###---###
@@ -275,7 +277,7 @@ if args.dataset == "food101":
     # Normalize using per-channel means and stds of imageNet training set
     # ResNet50 was trained on ImageNet with this exact normalization
     # Apply so that inputs aren't out of distribution for the pretrained model
-    normalize = transforms.Normalize([0.485,0.456,0.406],
+    """normalize = transforms.Normalize([0.485,0.456,0.406],
                                     [0.229,0.224,0.225])
 
     transform_train = transforms.Compose([
@@ -290,7 +292,31 @@ if args.dataset == "food101":
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         normalize,
+    ])"""
+    # ImageNet normalization
+    normalize = transforms.Normalize([0.485, 0.456, 0.406],
+                                    [0.229, 0.224, 0.225])
+
+    # Common training pipeline for ImageNet-pretrained ResNet on Food-101
+    transform_train = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(0.08, 1.0),
+                                    interpolation=InterpolationMode.BILINEAR),
+        transforms.RandomHorizontalFlip(p=0.5),
+        # Optional but common; comment these two out if you want the leanest setup:
+        # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+        # transforms.RandomGrayscale(p=0.2),
+        transforms.ToTensor(),
+        normalize,
     ])
+
+    # Standard eval pipeline
+    transform_test = transforms.Compose([
+        transforms.Resize(256, interpolation=InterpolationMode.BILINEAR),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
 
     data_root = os.path.join(args.root_dir, "food-101")
     if os.path.isdir(data_root):
@@ -302,6 +328,7 @@ if args.dataset == "food101":
         transform=transform_train,
         split_per=args.split_percentage,
         random_seed=args.seed,
+        stratified=True,  # stratified split for train/val
         download=args.download
     )
     val_dataset = data_load.Food101(
@@ -310,6 +337,7 @@ if args.dataset == "food101":
         transform=transform_test,
         split_per=args.split_percentage,
         random_seed=args.seed,
+        stratified=True,  # stratified split for train/val
         download=args.download
     )
     test_dataset = data_load.Food101(
@@ -371,6 +399,20 @@ class CombinedModel(torch.nn.Module):
         z = self.features(x)              # shape: [B, 2048, 1, 1]
         z = z.view(z.size(0), -1)         # shape: [B, 2048]
         return self.classifier(z)         # shape: [B, 101]
+
+def group_params_for_wd(module):
+    """
+    Split params into weight-decay and no-decay groups.
+    No decay for biases and normalization layers.
+    """
+    decay, no_decay = [], []
+    for name, p in module.named_parameters():
+        if not p.requires_grad:
+            continue
+        is_bias = name.endswith('.bias')
+        in_norm = any(k in name.lower() for k in ['bn', 'batchnorm', 'layernorm', 'groupnorm', 'ln', 'gn'])
+        (no_decay if (is_bias or in_norm) else decay).append(p)
+    return decay, no_decay
 
 
 def run():
@@ -438,25 +480,38 @@ def run():
     backbone_params   = list(model_features.parameters())
     classifier_params = list(model_classifier.parameters())
 
-    # Optimize backbone and classifier separately - backbone is SGD, classifier is AdamW
+    #initialize inference network for ARLVI
+    # Get the correct feature dimension from the backbone
+    feature_dim = model_classifier.in_features   # 512 (R-18) / 2048 (R-50)
     
-    #Adam gives the “still learning” head its own adaptive step-size 
-    #to cope with noisy, rapidly changing sample weights, while SGD 
-    #keeps the convolutional filters safe from destructive updates.
+    #instantiate the inference network
+    inference_net = InferenceNet(feature_dim).to(DEVICE)
+
+    # --- Optimizers: backbone (SGD+Nesterov), head (AdamW), inference (Adam) ---
+    bb_decay,  bb_no_decay  = group_params_for_wd(model_features)
+    hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
+
     optim_backbone = torch.optim.SGD(
-            backbone_params, 
-            lr=args.lr_init, 
-            momentum=args.momentum, 
-            weight_decay=args.wd
-        )
-    # AdamW optimizer for the classifier so that it can adapt quickly to non-stationary loss due to changing pi_i values
-    # weight noise makes effective LR fluctuate → SGD can stall
-    # Adam’s normalisation smooths those fluctuations
+        [
+            {'params': bb_decay,    'weight_decay': args.wd},
+            {'params': bb_no_decay, 'weight_decay': 0.0},
+        ],
+        lr=args.lr_init, momentum=args.momentum, nesterov=True
+    )
+
     optim_classifier = torch.optim.AdamW(
-            classifier_params, 
-            lr=args.lr_init * 10,  # 10x larger than backbone
-            weight_decay=5e-4
-        )
+        [
+            {'params': hd_decay,    'weight_decay': 5e-4},
+            {'params': hd_no_decay, 'weight_decay': 0.0},
+        ],
+        lr=args.lr_init * 10
+    )
+
+    optimizer_inf = torch.optim.Adam(
+        inference_net.parameters(),
+        lr=args.lr_inference, weight_decay=1e-4
+    )
+
 
     # pass both to train_arlvi as dict
     # ─── unified optimizer ────────────────────────────────
@@ -465,30 +520,27 @@ def run():
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
     if args.method in ['arlvi', 'arlvi_vanilla']:
-        # total number of batches per epoch:
         steps_per_epoch = len(train_loader)
-
         scheduler_backbone = OneCycleLR(
-                optim_backbone,
-                max_lr=args.lr_init * 5,      
-                div_factor=10.,      
-                final_div_factor=1e4,
-                pct_start=args.warmup_epochs / args.n_epoch, 
-                steps_per_epoch=steps_per_epoch, 
-                epochs=args.n_epoch
-            )
-
+            optim_backbone,
+            max_lr=args.lr_init * 5,
+            div_factor=10.0,
+            final_div_factor=1e4,
+            pct_start=args.warmup_epochs / args.n_epoch,
+            steps_per_epoch=steps_per_epoch,
+            epochs=args.n_epoch
+        )
         scheduler_classifier = OneCycleLR(
-                optim_classifier,
-                max_lr=args.lr_init*10,      
-                div_factor=10.,     
-                final_div_factor=1e4,
-                pct_start=args.warmup_epochs / args.n_epoch, 
-                steps_per_epoch=steps_per_epoch, 
-                epochs=args.n_epoch
-            )
-        schedulers = {"backbone": scheduler_backbone,
-              "classifier": scheduler_classifier}
+            optim_classifier,
+            max_lr=args.lr_init * 10,
+            div_factor=10.0,
+            final_div_factor=1e4,
+            pct_start=args.warmup_epochs / args.n_epoch,
+            steps_per_epoch=steps_per_epoch,
+            epochs=args.n_epoch
+        )
+        schedulers = {"backbone": scheduler_backbone, "classifier": scheduler_classifier}
+
 
 
 
@@ -534,17 +586,7 @@ def run():
     #    myfile.write("epoch:\ttime_ep\ttau\tfix\tclean,%\tcorr,%\ttrain_acc\tval_acc\ttest_acc\n")
     #    myfile.write(f"0:\t0\t0\t{False}\t100\t0\t0\t0\t{test_acc:8.4f}\n")
 
- 
-    #initialize inference network for ARLVI
-    # Get the correct feature dimension from the backbone
-    feature_dim = model_classifier.in_features   # 512 (R-18) / 2048 (R-50)
 
-    # Instantiate the inference network with that dimension
-    inference_net = InferenceNet(feature_dim).to(DEVICE)
-
-    # Optimiser for the inference network
-    optimizer_inf = torch.optim.Adam(inference_net.parameters(),
-                                    lr=args.lr_inference, weight_decay=1e-4)
 
     # Training
     # Vector of class-specific priors, initialized to 0.75
@@ -627,6 +669,9 @@ def run():
                 update_inference_every = args.update_inference_every,
                 tau                    = args.tau,
                 ema_alpha              = args.ema_alpha,
+                schedulers             = schedulers,
+                scaler                 = scaler,
+                grad_clip              = 5.0,          # (clip head only)
                 return_diag            = True
             )
 
@@ -703,10 +748,11 @@ def run():
         #test_acc = utils.evaluate(test_loader, model)
 
         # Print log-table
-        if (epoch + 1) % args.print_freq == 0:
+        if (epoch + 1) % args.print_freq == 0 and (test_acc is not None):
             utils.output_table(epoch, args.n_epoch, time_ep, train_acc=train_acc, test_acc=test_acc)
         else:
             utils.output_table(epoch, args.n_epoch, time_ep, train_acc=train_acc)
+
 
         # Prepare output: put dummy values for alternative methods
         if args.method != 'rlvi':
