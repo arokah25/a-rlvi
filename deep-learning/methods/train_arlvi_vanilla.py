@@ -1,6 +1,4 @@
 
-#A-RLVI implementation
-### ---------------------------------------------------------------------------
 from __future__ import annotations  # postpone evaluation of type hints (safer)
 from typing import Optional
 
@@ -193,13 +191,19 @@ def train_arlvi_vanilla(
                     pi_bar_running = ema_alpha * pi_bar_running + (1. - ema_alpha) * batch_mean_pi
             pi_bar = pi_bar_running.detach()        # scalar, detached
 
+            # --- normalize θ-weights so their batch mean is exactly 1 ---
+            # keeps the overall gradient scale for θ steady across batches.
+            # Use the detached π so no gradients flow into φ from the CE path.
+            pi_w = pi_i.detach() / (batch_mean_pi + 1e-8)   # shape (B,), mean(pi_w) == 1
+
+
             # 7) Loss definitions (one for inf_net and one for the backbone / classifier) 
 
             #   θ-loss (backbone + classifier):
             #   L_theta = mean( stop_grad(π_i) * CE_i )
             #   - Using stop_grad(π_i) BREAKS the collapse loop:
             #     φ cannot lower L_theta by shrinking π globally.
-            L_theta = (pi_i.detach() * ce_vec).mean()   # scalar
+            L_theta = (pi_w * ce_vec).mean()   # scalar
 
             #   φ-loss (inference net):
             #   Pull π_i toward its detached per-sample target q_i(τ)
@@ -212,7 +216,7 @@ def train_arlvi_vanilla(
             #   For logging epoch-averages, we sum CE and KL *as used*:
             #   - CE tracked with DETACHED π weights (matches L_theta use)
             #   - KL tracked as sum of both KL terms
-            ce_term = (pi_i.detach() * ce_vec).sum()                 # scalar
+            ce_term = (pi_w * ce_vec).sum()                          # scalar
             kl_term = (kl_to_q + kl_to_bar).sum()                    # scalar
 
         # ----------------- Backward / Optimizer steps -----------------
@@ -292,7 +296,7 @@ def train_arlvi_vanilla(
                 f"Lθ={L_theta.item():.3f} Lφ={L_phi.item():.3f} | "
                 f"CĒ={ce_vec.mean().item():.3f}  "
                 f"KLq̄={kl_to_q.mean().item():.3f}  KL_π̄={kl_to_bar.mean().item():.3f} | "
-                f"π̄={float(pi_bar):.3f} | "
+                f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar):.3f} | "
                 f"π_min={pi_i.min().item():.3f} π_max={pi_i.max().item():.3f} | "
                 f"spearman(pi_vs_negCE)={rho:.3f}  pct_pi_below_0.2={pct_low*100:.1f}%  pct_pi_above_0.8={pct_high*100:.1f}%"
             )
