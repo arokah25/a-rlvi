@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _soft_squash_to_open_unit_interval(logits: torch.Tensor, eps: float = 0.05) -> torch.Tensor:
+def _soft_squash_to_open_unit_interval(logits: torch.Tensor, eps: float = 0.02) -> torch.Tensor:
     """
     Map logits -> (eps, 1 - eps). This avoids π hitting 0/1 where gradients die.
     π = eps + (1 - 2*eps) * sigmoid(logits)
@@ -34,7 +34,7 @@ class InferenceNet(nn.Module):
         dropout_p:  float = 0.10,
         init_pi:    float = 0.5,   # prior belief; bias init uses logit(init_pi)
         use_silu:   bool  = True,  # SiLU tends to be a bit smoother than ReLU
-        eps_margin: float = 0.05,  # output kept in (eps, 1-eps); fixed, not a knob
+        eps_margin: float = 0.02,  # output kept in (eps, 1-eps); fixed, not a knob
     ):
         super().__init__()
         assert 0.0 < init_pi   < 1.0,  "init_pi must be in (0,1)"
