@@ -432,7 +432,8 @@ def run():
     test_acc = 0.0
         # Data Loaders
     # Keep this small on Colab until you confirm fast local IO
-    workers = max(1, min(args.num_workers, (os.cpu_count() or 2)//2))
+    workers = min(args.num_workers, os.cpu_count() or 2)
+
 
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
