@@ -269,15 +269,18 @@ def train_arlvi_vanilla(
         n_correct += logits.argmax(1).eq(labels).sum().item()
 
         # Per-batch grad norms (rough, but useful trend indicators)
-        grad_bb_batch  = sum((p.grad.norm().item() for p in model_features.parameters()   if p.grad is not None))
-        grad_cls_batch = sum((p.grad.norm().item() for p in model_classifier.parameters() if p.grad is not None))
-        grad_bb_sum  += grad_bb_batch
-        grad_cls_sum += grad_cls_batch
+        if (b_idx + 1) % log_every == 0:
+            # one reduction per group, no clipping (max_norm=inf)
+            total_norm_bb  = torch.nn.utils.clip_grad_norm_(model_features.parameters(), float('inf'))
+            total_norm_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf'))
+            grad_bb_sum  += float(total_norm_bb)
+            grad_cls_sum += float(total_norm_cls)
 
-        if update_inference_every == "batch":
-            grad_inf_batch = sum((p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None))
-            grad_inf_sum   += grad_inf_batch
-            n_inf_batches  += 1
+            if update_inference_every == "batch":
+                total_norm_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), float('inf'))
+                grad_inf_sum   += float(total_norm_inf)
+                n_inf_batches  += 1
+
 
         # Keep a small sample of π values for histogram later
         ps = pi_i.detach().flatten().cpu()
