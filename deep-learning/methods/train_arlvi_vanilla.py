@@ -1,4 +1,3 @@
-
 from __future__ import annotations  # postpone evaluation of type hints (safer)
 from typing import Optional
 
@@ -104,6 +103,8 @@ def train_arlvi_vanilla(
     # === Diagnostics / logging ===
     return_diag:      bool  = False,
     log_every:        int   = 200,
+    schedulers:       dict | None = None,
+    grad_clip:        float | None = None,
 ):
     """
     Trains A-RLVI for ONE epoch with:
@@ -135,7 +136,7 @@ def train_arlvi_vanilla(
     # Keep a small sample of π values for histogram/diagnostics (memory-safe)
     pi_samples, pi_cap = [], 20_000
 
-    # --- NEW: nice-to-have diagnostics (epoch aggregates) ---
+    # --- diagnostics (epoch aggregates) ---
     spearman_sum = 0.0    # average Spearman(π, -CE)
     spearman_cnt = 0
     pct_low_sum  = 0.0    # % of π < 0.2
@@ -220,37 +221,44 @@ def train_arlvi_vanilla(
             kl_term = (kl_to_q + kl_to_bar).sum()                    # scalar
 
         # ----------------- Backward / Optimizer steps -----------------
-        # Zero grads
         for opt in (optim_backbone, optim_classifier):
             opt.zero_grad(set_to_none=True)
         if update_inference_every == "batch":
             optim_inference.zero_grad(set_to_none=True)
 
-        # --- optional mixed-precision with GradScaler ---
         if scaler is not None and torch.cuda.is_available():
             if update_inference_every == "batch":
-                # Batch mode: safe to scale joint loss and step all optimizers now.
                 scaler.scale(L_theta + L_phi).backward()
+                # Clip only classifier head grads (after unscale so norms are real)
+                if grad_clip is not None:
+                    scaler.unscale_(optim_classifier)
+                    torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
                 scaler.step(optim_backbone)
                 scaler.step(optim_classifier)
                 scaler.step(optim_inference)
                 scaler.update()
             else:
-                # Epoch mode: θ steps every batch, φ accumulates over the epoch.
-                # Scale only L_theta so scaler.update does not affect φ's accumulated grads.
                 scaler.scale(L_theta).backward()
-                # φ backward unscaled (still under autocast, but not scaled by GradScaler)
+                if grad_clip is not None:
+                    scaler.unscale_(optim_classifier)
+                    torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
                 L_phi.backward()
                 scaler.step(optim_backbone)
                 scaler.step(optim_classifier)
                 scaler.update()
         else:
-            # No scaler: standard FP32 training
             (L_theta + L_phi).backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
             optim_backbone.step()
             optim_classifier.step()
             if update_inference_every == "batch":
                 optim_inference.step()
+
+        # Step LR schedulers *per batch* (after optimizer.step)
+        if schedulers is not None:
+            schedulers['backbone'].step()
+            schedulers['classifier'].step()
 
         # ----------------- Stats / Diagnostics -----------------
         ce_sum += ce_term.item()
