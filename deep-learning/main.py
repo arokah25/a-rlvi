@@ -267,6 +267,9 @@ if args.dataset == 'cifar100':
 if args.dataset == "food101":
     input_channel = 3
     num_classes = 101
+    # Build a val split only if you are NOT using 100% of noisy train
+    BUILD_VAL = (args.eval_val_every > 0) and (0.0 < args.split_percentage < 1.0)
+
 
 
 
@@ -328,25 +331,33 @@ if args.dataset == "food101":
         transform=transform_train,
         split_per=args.split_percentage,
         random_seed=args.seed,
-        stratified=True,  # stratified split for train/val
+        stratified=True,
         download=args.download
+        )
+
+    if BUILD_VAL:
+        val_dataset = data_load.Food101(
+            root=args.root_dir,
+            split="val",
+            transform=transform_test,
+            split_per=args.split_percentage,
+            random_seed=args.seed,
+            stratified=True,
+            download=args.download
     )
-    val_dataset = data_load.Food101(
-        root=args.root_dir,
-        split="val",
-        transform=transform_test,
-        split_per=args.split_percentage,
-        random_seed=args.seed,
-        stratified=True,  # stratified split for train/val
-        download=args.download
-    )
+    else:
+        val_dataset = None
+        # Prevent accidental attempts to evaluate val
+        args.eval_val_every = -1
+
     test_dataset = data_load.Food101(
         root=args.root_dir,
-        split="test",          # clean!
+        split="test",
         transform=transform_test,
         split_per=1.0,
         download=args.download
-    )
+        )
+
 # --------- LMDB-backed Food-101 datasets ----------
 
 """lmdb_root = os.path.join(args.root_dir, 'food101_lmdb')
@@ -434,16 +445,19 @@ def run():
         prefetch_factor=1           # ← avoid preloading huge batches before you see any logs
     )
 
-    val_loader = torch.utils.data.DataLoader(
-        dataset=val_dataset,
-        batch_size=args.batch_size,
-        num_workers=workers,
-        shuffle=False,
-        drop_last=False,
-        pin_memory=True,
-        persistent_workers=False,
-        prefetch_factor=1
+    if val_dataset is not None:
+        val_loader = torch.utils.data.DataLoader(
+            dataset=val_dataset,
+            batch_size=args.batch_size,
+            num_workers=workers,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=True,
+            persistent_workers=False,
+            prefetch_factor=1
     )
+    else:
+        val_loader = None
 
     test_loader = torch.utils.data.DataLoader(
         dataset=test_dataset,
