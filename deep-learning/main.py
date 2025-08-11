@@ -441,8 +441,8 @@ def run():
         shuffle=True,
         drop_last=False,
         pin_memory=True,
-        persistent_workers=False,   # ← let workers die between epochs to avoid long “warmups”
-        prefetch_factor=1           # ← avoid preloading huge batches before you see any logs
+        persistent_workers=True,   # ← let workers die between epochs to avoid long “warmups”
+        prefetch_factor=2           # ← avoid preloading huge batches before you see any logs
     )
 
     if val_dataset is not None:
@@ -453,8 +453,8 @@ def run():
             shuffle=False,
             drop_last=False,
             pin_memory=True,
-            persistent_workers=False,
-            prefetch_factor=1
+            persistent_workers=True,
+            prefetch_factor=2
     )
     else:
         val_loader = None
@@ -525,7 +525,7 @@ def run():
 
     optimizer_inf = torch.optim.Adam(
         inference_net.parameters(),
-        lr=2e-4, weight_decay=1e-4
+        lr=args.lr_inference, weight_decay=1e-4
     )
 
 
@@ -549,7 +549,7 @@ def run():
         )
         scheduler_classifier = OneCycleLR(
             optim_classifier,
-            max_lr=1e-2,            # peak LR for head (AdamW)
+            max_lr=5e-3,            # peak LR for head (AdamW)
             div_factor=10.0,        # start at 1e-3
             final_div_factor=1e3,   # end around 1e-5
             pct_start=args.warmup_epochs / args.n_epoch,
