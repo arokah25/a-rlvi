@@ -28,31 +28,47 @@ class Food101(torch.utils.data.Dataset):
         * "test"  → 25 250 clean test imgs (always the same, no noise)
     """
     def __init__(self, root, split="train", transform=None,
-                 split_per=0.75, random_seed=1, download=True):
+                 split_per=0.75, random_seed=1, stratified=False, download=True):
 
         from torchvision.datasets import Food101 as TorchFood101
-
         assert split in {"train", "val", "test"}
         self.transform = transform
 
-        # load the official split
         base_split = "train" if split in {"train", "val"} else "test"
         full_ds = TorchFood101(root, split=base_split, download=download)
 
-        self.images = full_ds._image_files
-        self.labels = full_ds._labels          # integers 0‥100
+        # be robust to torchvision version differences
+        if hasattr(full_ds, "_image_files") and hasattr(full_ds, "_labels"):
+            self.images = full_ds._image_files
+            self.labels = np.array(full_ds._labels, dtype=int)
+        elif hasattr(full_ds, "imgs"):  # list[(path, label)]
+            pairs = full_ds.imgs
+            self.images = [p for p, _ in pairs]
+            self.labels = np.array([y for _, y in pairs], dtype=int)
+        else:
+            raise RuntimeError("Unsupported torchvision.Food101 structure")
 
-        # optional sub-split only **within** the noisy training subset
+        rng = np.random.default_rng(random_seed)
+
         if split in {"train", "val"} and 0. < split_per < 1.:
-            idx = np.arange(len(self.images))
-            rng = np.random.default_rng(random_seed)
-            rng.shuffle(idx)
-
-            cut = int(len(idx) * split_per)
-            self.indices = idx[:cut]  if split == "train" else idx[cut:]
+            if stratified:
+                train_idx, val_idx = [], []
+                for c in np.unique(self.labels):
+                    idx_c = np.where(self.labels == c)[0]
+                    rng.shuffle(idx_c)
+                    cut = int(len(idx_c) * split_per)
+                    train_idx.append(idx_c[:cut])
+                    val_idx.append(idx_c[cut:])
+                train_idx = np.concatenate(train_idx)
+                val_idx   = np.concatenate(val_idx)
+                self.indices = train_idx if split == "train" else val_idx
+            else:
+                idx = np.arange(len(self.images))
+                rng.shuffle(idx)
+                cut = int(len(idx) * split_per)
+                self.indices = idx[:cut] if split == "train" else idx[cut:]
         else:
             self.indices = np.arange(len(self.images))
-
     # ------------------------------------------------------------
     def __getitem__(self, i):
         real_idx = self.indices[i]
@@ -63,7 +79,6 @@ class Food101(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.indices)
-
 
 
 class Mnist(torch.utils.data.Dataset):
