@@ -179,7 +179,7 @@ def train_arlvi_vanilla(
             #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
             r_i = _zscore_detached(ce_vec)          # (B,) detached
             #    q_i(τ) := σ( - r_i / τ )  → lower-than-avg CE (easy) → q ≈ 1 (clean)
-            #q_i = torch.sigmoid(-r_i / tau)         # (B,) detached (r_i is detached) --- (I) version A non-scaled
+            q_i = torch.sigmoid(-r_i / tau)         # (B,) detached (r_i is detached)
 
             # 6) Slow global prior π̄  (scalar) via EMA of mean(π) per batch
             batch_mean_pi = pi_i.mean().detach()    # scalar (0-dim tensor), detached
@@ -190,39 +190,6 @@ def train_arlvi_vanilla(
                 else:
                     pi_bar_running = ema_alpha * pi_bar_running + (1. - ema_alpha) * batch_mean_pi
             pi_bar = pi_bar_running.detach()        # scalar, detached
-
-            #####################
-            # --- 6b) CALIBRATE q_i so its batch mean matches the EMA prior π̄ ---
-            # Start from the uncalibrated target built from z-scored CE (keeps order info)
-            eps_q = 1e-6
-            q0 = torch.sigmoid(-r_i / tau).clamp(eps_q, 1.0 - eps_q)  # (B,)
-            logits0 = torch.logit(q0)                                  # (B,)
-
-            # Target mean is the EMA prior (scalar); keep everything on the same device
-            target = float(pi_bar.clamp(eps_q, 1.0 - eps_q))           # Python float is fine here
-
-            # Good initial guess for the bias by matching logits of means
-            m0 = float(q0.mean().clamp(eps_q, 1.0 - eps_q))
-            b = torch.tensor(
-                torch.logit(torch.tensor(target, device=logits0.device))
-                - torch.logit(torch.tensor(m0,     device=logits0.device)),
-                device=logits0.device
-            )
-
-            # 1–2 Newton steps: f(b)=mean(sigmoid(logits0+b)) - target; f'(b)=mean(s*(1-s))
-            for _ in range(2):
-                s = torch.sigmoid(logits0 + b)      # (B,)
-                f = s.mean() - target               # scalar
-                g = (s * (1.0 - s)).mean()          # scalar
-                b = b - f / (g + 1e-8)
-
-            # Clamp extreme shifts (safety on odd batches)
-            b = b.clamp(-10.0, 10.0)
-
-            # Final calibrated target; DETACH so no gradients flow through the target
-            q_i = torch.sigmoid(logits0 + b).detach()   # (B,)
-            ###################
-
 
             # --- normalize θ-weights so their batch mean is exactly 1 ---
             # keeps the overall gradient scale for θ steady across batches.
