@@ -488,28 +488,30 @@ def run():
     inference_net = InferenceNet(feature_dim).to(DEVICE)
 
     # --- Optimizers: backbone (SGD+Nesterov), head (AdamW), inference (Adam) ---
+    # --- param groups (yours) ---
     bb_decay,  bb_no_decay  = group_params_for_wd(model_features)
     hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
 
+    # --- optimizers ---
     optim_backbone = torch.optim.SGD(
         [
-            {'params': bb_decay,    'weight_decay': args.wd},
+            {'params': bb_decay,    'weight_decay': 1e-4},
             {'params': bb_no_decay, 'weight_decay': 0.0},
         ],
-        lr=args.lr_init, momentum=args.momentum, nesterov=True
+        lr=0.001, momentum=0.9, nesterov=True  # lr here is ignored by OneCycle, but keep sane
     )
 
     optim_classifier = torch.optim.AdamW(
         [
-            {'params': hd_decay,    'weight_decay': 5e-4},
+            {'params': hd_decay,    'weight_decay': 0.01},  # stronger WD on the head
             {'params': hd_no_decay, 'weight_decay': 0.0},
         ],
-        lr=args.lr_init * 10
+        lr=0.001  # OneCycle will ramp to 0.01
     )
 
     optimizer_inf = torch.optim.Adam(
         inference_net.parameters(),
-        lr=args.lr_inference, weight_decay=1e-4
+        lr=2e-4, weight_decay=1e-4
     )
 
 
@@ -520,21 +522,22 @@ def run():
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
     if args.method in ['arlvi', 'arlvi_vanilla']:
+        # --- schedulers (per-batch step) ---
         steps_per_epoch = len(train_loader)
         scheduler_backbone = OneCycleLR(
             optim_backbone,
-            max_lr=args.lr_init * 5,
-            div_factor=10.0,
-            final_div_factor=1e4,
+            max_lr=1e-2,            # peak LR for backbone
+            div_factor=10.0,        # start at 1e-3
+            final_div_factor=1e3,   # end around 1e-5
             pct_start=args.warmup_epochs / args.n_epoch,
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
         )
         scheduler_classifier = OneCycleLR(
             optim_classifier,
-            max_lr=args.lr_init * 10,
-            div_factor=10.0,
-            final_div_factor=1e4,
+            max_lr=1e-2,            # peak LR for head (AdamW)
+            div_factor=10.0,        # start at 1e-3
+            final_div_factor=1e3,   # end around 1e-5
             pct_start=args.warmup_epochs / args.n_epoch,
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
