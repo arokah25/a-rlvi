@@ -302,15 +302,13 @@ if args.dataset == "food101":
 
     # Common training pipeline for ImageNet-pretrained ResNet on Food-101
     transform_train = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.08, 1.0),
-                                    interpolation=InterpolationMode.BILINEAR),
-        transforms.RandomHorizontalFlip(p=0.5),
-        # Optional but common; comment these two out if you want the leanest setup:
-        # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-        # transforms.RandomGrayscale(p=0.2),
-        transforms.ToTensor(),
-        normalize,
+    transforms.RandomResizedCrop(224, scale=(0.5, 1.0),
+                                 interpolation=InterpolationMode.BILINEAR),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ToTensor(),
+    normalize,
     ])
+
 
     # Standard eval pipeline
     transform_test = transforms.Compose([
@@ -432,7 +430,7 @@ def run():
     test_acc = 0.0
         # Data Loaders
     # Keep this small on Colab until you confirm fast local IO
-    workers = min(args.num_workers, os.cpu_count() or 2)
+    workers = args.num_workers
 
 
     train_loader = torch.utils.data.DataLoader(
@@ -442,8 +440,8 @@ def run():
         shuffle=True,
         drop_last=False,
         pin_memory=True,
-        persistent_workers=True,   # ← let workers die between epochs to avoid long “warmups”
-        prefetch_factor=2           # ← avoid preloading huge batches before you see any logs
+        persistent_workers=True,  
+        prefetch_factor=4       
     )
 
     if val_dataset is not None:
@@ -455,7 +453,7 @@ def run():
             drop_last=False,
             pin_memory=True,
             persistent_workers=True,
-            prefetch_factor=2
+            prefetch_factor=4
     )
     else:
         val_loader = None
@@ -541,7 +539,7 @@ def run():
         steps_per_epoch = len(train_loader)
         scheduler_backbone = OneCycleLR(
             optim_backbone,
-            max_lr=1e-2,            # peak LR for backbone
+            max_lr= args.lr_init * 5,            # peak LR for backbone
             div_factor=10.0,        # start at 1e-3
             final_div_factor=1e3,   # end around 1e-5
             pct_start=args.warmup_epochs / args.n_epoch,
@@ -550,7 +548,7 @@ def run():
         )
         scheduler_classifier = OneCycleLR(
             optim_classifier,
-            max_lr=5e-3,            # peak LR for head (AdamW)
+            max_lr=args.lr_init * 2.5,            # peak LR for head (AdamW)
             div_factor=10.0,        # start at 1e-3
             final_div_factor=1e3,   # end around 1e-5
             pct_start=args.warmup_epochs / args.n_epoch,
