@@ -177,7 +177,7 @@ def train_arlvi_vanilla(
 
             # Defining inference target q_i(τ) -- 4 and 5 below:
             # 4) Per-sample supervised loss (e.g., CE) — NO reduction
-            ce_vec = F.cross_entropy(logits, labels, reduction="none", label_smoothing=0.05)  # (B,)
+            ce_vec = F.cross_entropy(logits, labels, reduction="none", label_smoothing=0.02)  # (B,)
 
             # 5) DETACHED per-sample target via batch z-scored CE:
             #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
