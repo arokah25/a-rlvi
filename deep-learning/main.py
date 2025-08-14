@@ -280,33 +280,28 @@ if args.dataset == "food101":
     # Normalize using per-channel means and stds of imageNet training set
     # ResNet50 was trained on ImageNet with this exact normalization
     # Apply so that inputs aren't out of distribution for the pretrained model
-    """normalize = transforms.Normalize([0.485,0.456,0.406],
-                                    [0.229,0.224,0.225])
 
-    transform_train = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        normalize,
-    ])"""
     # ImageNet normalization
     normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                     [0.229, 0.224, 0.225])
 
     # Common training pipeline for ImageNet-pretrained ResNet on Food-101
-    transform_train = transforms.Compose([
+    """transform_train = transforms.Compose([
     transforms.RandomResizedCrop(224, scale=(0.5, 1.0),
                                  interpolation=InterpolationMode.BILINEAR),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.ToTensor(),
     normalize,
+    ])"""
+
+    transform_train = transforms.Compose([
+    transforms.RandomResizedCrop(224, scale=(0.5, 1.0),
+                                 interpolation=InterpolationMode.BILINEAR),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),          # ← add
+    transforms.ToTensor(),
+    normalize,
+    transforms.RandomErasing(p=0.25, scale=(0.02, 0.2)),  # ← add (after normalize)
     ])
 
 
@@ -475,10 +470,15 @@ def run():
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
         #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
-        backbone.fc = torch.nn.Linear(backbone.fc.in_features, num_classes) #final classification layer
+        in_dim = backbone.fc.in_features                 # <- get it while fc is Linear
+        backbone.fc = torch.nn.Sequential(
+            torch.nn.Dropout(p=0.3),
+            torch.nn.Linear(in_dim, num_classes)
+        )
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
         model_classifier = backbone.fc
+        feature_dim = in_dim  # 2048 for ResNet50, 512 for ResNet18
 
         model = CombinedModel(model_features, model_classifier)
 
@@ -493,12 +493,10 @@ def run():
     backbone_params   = list(model_features.parameters())
     classifier_params = list(model_classifier.parameters())
 
-    #initialize inference network for ARLVI
-    # Get the correct feature dimension from the backbone
-    feature_dim = model_classifier.in_features   # 512 (R-18) / 2048 (R-50)
-    
+    #initialize inference network for ARLVI    
     #instantiate the inference network
     inference_net = InferenceNet(feature_dim).to(DEVICE)
+    
 
     # --- Optimizers: backbone (SGD+Nesterov), head (AdamW), inference (Adam) ---
     # --- param groups (yours) ---
@@ -506,21 +504,22 @@ def run():
     hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
 
     # --- optimizers ---
-    optim_backbone = torch.optim.SGD(
-        [
-            {'params': bb_decay,    'weight_decay': 1e-4},
-            {'params': bb_no_decay, 'weight_decay': 0.0},
-        ],
-        lr=0.001, momentum=0.9, nesterov=True  # lr here is ignored by OneCycle, but keep sane
-    )
-
     optim_classifier = torch.optim.AdamW(
         [
-            {'params': hd_decay,    'weight_decay': 0.01},  # stronger WD on the head
+            {'params': hd_decay,    'weight_decay': 2e-3},   # was 0.01
             {'params': hd_no_decay, 'weight_decay': 0.0},
         ],
-        lr=0.001  # OneCycle will ramp to 0.01
+        lr=0.001
     )
+
+    optim_backbone = torch.optim.SGD(
+        [
+            {'params': bb_decay,    'weight_decay': 1e-4},   # was 1e-4
+            {'params': bb_no_decay, 'weight_decay': 0.0},
+        ],
+        lr=0.001, momentum=0.9, nesterov=True
+    )
+
 
     optimizer_inf = torch.optim.Adam(
         inference_net.parameters(),
@@ -539,18 +538,18 @@ def run():
         steps_per_epoch = len(train_loader)
         scheduler_backbone = OneCycleLR(
             optim_backbone,
-            max_lr= args.lr_init * 5,            # peak LR for backbone
-            div_factor=10.0,        # start at 1e-3
-            final_div_factor=1e3,   # end around 1e-5
+            max_lr= args.lr_init * 0.5,            # peak LR for backbone
+            div_factor=10.0,       
+            final_div_factor=1e3,   
             pct_start=args.warmup_epochs / args.n_epoch,
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
         )
         scheduler_classifier = OneCycleLR(
             optim_classifier,
-            max_lr=args.lr_init * 2.5,            # peak LR for head (AdamW)
+            max_lr=args.lr_init * 5,            # peak LR for head (AdamW)
             div_factor=10.0,        # start at 1e-3
-            final_div_factor=1e3,   # end around 1e-5
+            final_div_factor=1e2,   # end around 1e-5
             pct_start=args.warmup_epochs / args.n_epoch,
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
