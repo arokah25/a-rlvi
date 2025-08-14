@@ -131,7 +131,10 @@ def train_arlvi_vanilla(
     grad_bb_sum  = 0.0                # ∥grad∥ over backbone params per batch
     grad_cls_sum = 0.0                # ∥grad∥ over classifier params per batch
     grad_inf_sum = 0.0                # ∥grad∥ over inference net params per (update) batch
-    n_inf_batches = 0
+
+    # --- persistent counters for how many times we snapshot grads ---
+    grad_snapshots = 0
+    inf_snapshots  = 0
 
     # Keep a small sample of π values for histogram/diagnostics (memory-safe)
     pi_samples, pi_cap = [], 20_000
@@ -197,9 +200,7 @@ def train_arlvi_vanilla(
             # Use the detached π so no gradients flow into φ from the CE path.
             pi_w = pi_i.detach() / (batch_mean_pi + 1e-8)   # shape (B,), mean(pi_w) == 1
 
-
             # 7) Loss definitions (one for inf_net and one for the backbone / classifier) 
-
             #   θ-loss (backbone + classifier):
             #   L_theta = mean( stop_grad(π_i) * CE_i )
             #   - Using stop_grad(π_i) BREAKS the collapse loop:
@@ -233,23 +234,63 @@ def train_arlvi_vanilla(
                 if grad_clip is not None:
                     scaler.unscale_(optim_classifier)
                     torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
-                scaler.step(optim_backbone)
-                scaler.step(optim_classifier)
-                scaler.step(optim_inference)
-                scaler.update()
             else:
                 scaler.scale(L_theta).backward()
                 if grad_clip is not None:
                     scaler.unscale_(optim_classifier)
                     torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
                 L_phi.backward()
-                scaler.step(optim_backbone)
-                scaler.step(optim_classifier)
-                scaler.update()
         else:
             (L_theta + L_phi).backward()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
+
+        # ----- measure grad norms on UN-SCALED grads, BEFORE .step() -----
+        if (b_idx + 1) % log_every == 0:
+            if scaler is not None and torch.cuda.is_available():
+                # ensure grads are unscaled for *all* optimizers we will measure
+                scaler.unscale_(optim_backbone)
+                scaler.unscale_(optim_classifier)
+                if update_inference_every == "batch":
+                    scaler.unscale_(optim_inference)
+
+            # measure without modifying grads (max_norm=inf is a no-op)
+            total_norm_bb  = torch.nn.utils.clip_grad_norm_(model_features.parameters(),  float('inf'))
+            total_norm_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf'))
+            grad_bb_sum  += float(total_norm_bb)
+            grad_cls_sum += float(total_norm_cls)
+            grad_snapshots += 1
+
+            if update_inference_every == "batch":
+                total_norm_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), float('inf'))
+                grad_inf_sum   += float(total_norm_inf)
+                inf_snapshots  += 1
+
+            # Lightweight batch log
+            tqdm.write(
+                f"  ↳ bt {b_idx:04d}: "
+                f"Lθ={L_theta.item():.3f} Lφ={L_phi.item():.3f} | "
+                f"CĒ={ce_vec.mean().item():.3f}  "
+                f"KLq̄={kl_to_q.mean().item():.3f}  KL_π̄={kl_to_bar.mean().item():.3f} | "
+                f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar):.3f} | "
+                f"π_min={pi_i.min().item():.3f} π_max={pi_i.max().item():.3f} | "
+                f"spearman(pi_vs_negCE)={_spearman_corr_torch(pi_i, -ce_vec):.3f}  "
+                f"pct_pi_below_0.2={(pi_i < 0.2).float().mean().item()*100:.1f}%  "
+                f"pct_pi_above_0.8={(pi_i > 0.8).float().mean().item()*100:.1f}%"
+            )
+
+        # ----- now do optimizer.step() / scaler.step() -----
+        if scaler is not None and torch.cuda.is_available():
+            if update_inference_every == "batch":
+                scaler.step(optim_backbone)
+                scaler.step(optim_classifier)
+                scaler.step(optim_inference)
+                scaler.update()
+            else:
+                scaler.step(optim_backbone)
+                scaler.step(optim_classifier)
+                scaler.update()
+        else:
             optim_backbone.step()
             optim_classifier.step()
             if update_inference_every == "batch":
@@ -268,49 +309,21 @@ def train_arlvi_vanilla(
         # Accuracy: argmax over logits vs labels
         n_correct += logits.argmax(1).eq(labels).sum().item()
 
-        # Per-batch grad norms (rough, but useful trend indicators)
-        if (b_idx + 1) % log_every == 0:
-            # one reduction per group, no clipping (max_norm=inf)
-            total_norm_bb  = torch.nn.utils.clip_grad_norm_(model_features.parameters(), float('inf'))
-            total_norm_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf'))
-            grad_bb_sum  += float(total_norm_bb)
-            grad_cls_sum += float(total_norm_cls)
-
-            if update_inference_every == "batch":
-                total_norm_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), float('inf'))
-                grad_inf_sum   += float(total_norm_inf)
-                n_inf_batches  += 1
-
-
         # Keep a small sample of π values for histogram later
         ps = pi_i.detach().flatten().cpu()
         if ps.numel() and sum(t.numel() for t in pi_samples) < pi_cap:
             pi_samples.append(ps[: min(1024, ps.numel())])
 
-        # --- NEW: nice-to-have diagnostics per batch ---
-        # Spearman correlation between π and -CE (higher is better separation)
+        # --- additional per-batch diagnostics (epoch aggregates) ---
         rho = _spearman_corr_torch(pi_i, -ce_vec)
         spearman_sum += rho
         spearman_cnt += 1
 
-        # Percent of extreme π values (proxy for bimodality)
         pct_low  = (pi_i < 0.2).float().mean().item()
         pct_high = (pi_i > 0.8).float().mean().item()
         pct_low_sum  += pct_low
         pct_high_sum += pct_high
         pct_cnt      += 1
-
-        # Lightweight batch log
-        if (b_idx + 1) % log_every == 0:
-            tqdm.write(
-                f"  ↳ bt {b_idx:04d}: "
-                f"Lθ={L_theta.item():.3f} Lφ={L_phi.item():.3f} | "
-                f"CĒ={ce_vec.mean().item():.3f}  "
-                f"KLq̄={kl_to_q.mean().item():.3f}  KL_π̄={kl_to_bar.mean().item():.3f} | "
-                f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar):.3f} | "
-                f"π_min={pi_i.min().item():.3f} π_max={pi_i.max().item():.3f} | "
-                f"spearman(pi_vs_negCE)={rho:.3f}  pct_pi_below_0.2={pct_low*100:.1f}%  pct_pi_above_0.8={pct_high*100:.1f}%"
-            )
 
     # ----------------- Once-per-epoch φ step (if chosen) -----------------
     if update_inference_every == "epoch":
@@ -325,18 +338,19 @@ def train_arlvi_vanilla(
         else:
             optim_inference.step()
 
-        # For diagnostics, grab a final grad norm snapshot
+        # For diagnostics, grab a final grad norm snapshot for φ
         grad_inf_sum  = sum((p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None))
-        n_inf_batches = 1
+        inf_snapshots = 1  # exactly one snapshot in epoch mode
 
     # ----------------- Epoch averages -----------------
     ce_epoch  = ce_sum / n_seen
     kl_epoch  = kl_sum / n_seen
     acc_epoch = n_correct / n_seen
 
-    grad_bb  = grad_bb_sum  / len(dataloader)
-    grad_cls = grad_cls_sum / len(dataloader)
-    grad_inf = grad_inf_sum / max(1, n_inf_batches)
+    # --- use the snapshot counters for averaging ---
+    grad_bb  = grad_bb_sum  / max(1, grad_snapshots)
+    grad_cls = grad_cls_sum / max(1, grad_snapshots)
+    grad_inf = grad_inf_sum / max(1, inf_snapshots)
 
     # Collate π diagnostics
     if pi_samples:
@@ -364,7 +378,6 @@ def train_arlvi_vanilla(
         "spearman_rank_pi_vs_negCE": float(rho_epoch),     # Rank correlation between π and -CE
         "percent_pi_below_0.2":      float(pct_low_epoch), # % samples with π < 0.2 (likely corrupt)
         "percent_pi_above_0.8":      float(pct_high_epoch) # % samples with π > 0.8 (likely clean)
-
     }
 
     if return_diag:
