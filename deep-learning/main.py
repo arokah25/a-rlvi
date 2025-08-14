@@ -298,10 +298,10 @@ if args.dataset == "food101":
     transforms.RandomResizedCrop(224, scale=(0.5, 1.0),
                                  interpolation=InterpolationMode.BILINEAR),
     transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),          # ← add
+    transforms.ColorJitter(0.3, 0.3, 0.3, 0.05),       
     transforms.ToTensor(),
     normalize,
-    transforms.RandomErasing(p=0.25, scale=(0.02, 0.2)),  # ← add (after normalize)
+    transforms.RandomErasing(p=0.15, scale=(0.02, 0.2)),  # (after normalize)
     ])
 
 
@@ -472,7 +472,7 @@ def run():
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
         in_dim = backbone.fc.in_features                 # <- get it while fc is Linear
         backbone.fc = torch.nn.Sequential(
-            torch.nn.Dropout(p=0.3),
+            torch.nn.Dropout(p=0.2),
             torch.nn.Linear(in_dim, num_classes)
         )
         # Split the model into a feature extractor and classifier
@@ -506,7 +506,7 @@ def run():
     # --- optimizers ---
     optim_classifier = torch.optim.AdamW(
         [
-            {'params': hd_decay,    'weight_decay': 2e-3},   # was 0.01
+            {'params': hd_decay,    'weight_decay': 8e-4},   
             {'params': hd_no_decay, 'weight_decay': 0.0},
         ],
         lr=0.001
