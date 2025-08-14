@@ -229,16 +229,30 @@ def train_arlvi_vanilla(
 
         if scaler is not None and torch.cuda.is_available():
             if update_inference_every == "batch":
+                # backward with scaling
                 scaler.scale(L_theta + L_phi).backward()
-                # Clip only classifier head grads (after unscale so norms are real)
+
+                # ---- UN-SCALE ONCE per optimizer (before any clipping or logging) ----
+                scaler.unscale_(optim_backbone)
+                scaler.unscale_(optim_classifier)
+                scaler.unscale_(optim_inference)
+
+                # optional clipping (on unscaled grads)
                 if grad_clip is not None:
-                    scaler.unscale_(optim_classifier)
                     torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
+
             else:
+                # (epoch mode) scale only the θ loss; φ is unscaled
                 scaler.scale(L_theta).backward()
+
+                # ---- UN-SCALE ONCE per optimizer (before any clipping or logging) ----
+                scaler.unscale_(optim_backbone)
+                scaler.unscale_(optim_classifier)
+
                 if grad_clip is not None:
-                    scaler.unscale_(optim_classifier)
                     torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
+
+                # φ loss backward without scaler in epoch mode
                 L_phi.backward()
         else:
             (L_theta + L_phi).backward()
@@ -247,13 +261,6 @@ def train_arlvi_vanilla(
 
         # ----- measure grad norms on UN-SCALED grads, BEFORE .step() -----
         if (b_idx + 1) % log_every == 0:
-            if scaler is not None and torch.cuda.is_available():
-                # ensure grads are unscaled for *all* optimizers we will measure
-                scaler.unscale_(optim_backbone)
-                scaler.unscale_(optim_classifier)
-                if update_inference_every == "batch":
-                    scaler.unscale_(optim_inference)
-
             # measure without modifying grads (max_norm=inf is a no-op)
             total_norm_bb  = torch.nn.utils.clip_grad_norm_(model_features.parameters(),  float('inf'))
             total_norm_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf'))
