@@ -105,6 +105,8 @@ def train_arlvi_vanilla(
     log_every:        int   = 200,
     schedulers:       dict | None = None,
     grad_clip:        float | None = None,
+    pi_bins:         tuple[float, float] = (0.25, 0.75),
+
 ):
     """
     Trains A-RLVI for ONE epoch with:
@@ -142,9 +144,19 @@ def train_arlvi_vanilla(
     # --- diagnostics (epoch aggregates) ---
     spearman_sum = 0.0    # average Spearman(π, -CE)
     spearman_cnt = 0
-    pct_low_sum  = 0.0    # % of π < 0.2
-    pct_high_sum = 0.0    # % of π > 0.8
+    pct_low_sum  = 0.0    # % of π < 0.25
+    pct_high_sum = 0.0    # % of π > 0.75
     pct_cnt      = 0
+    
+    # LR traces (per-batch)
+    lr_trace_bb:  list[float] = []
+    lr_trace_cls: list[float] = []
+
+    # π→correctness accumulators
+    bin_lo, bin_hi = pi_bins
+    pi_bin_totals  = [0, 0, 0]   # [<lo, lo–hi, >hi]
+    pi_bin_correct = [0, 0, 0]
+
 
     # Slow global prior π̄ (scalar) maintained as an EMA of mean(π) per batch
     pi_bar_running: torch.Tensor | None = None  # will hold a 0-dim tensor on device
@@ -177,7 +189,7 @@ def train_arlvi_vanilla(
 
             # Defining inference target q_i(τ) -- 4 and 5 below:
             # 4) Per-sample supervised loss (e.g., CE) — NO reduction
-            ce_vec = F.cross_entropy(logits, labels, reduction="none", label_smoothing=0.02)  # (B,)
+            ce_vec = F.cross_entropy(logits, labels, reduction="none")  # (B,)
 
             # 5) DETACHED per-sample target via batch z-scored CE:
             #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
@@ -282,8 +294,8 @@ def train_arlvi_vanilla(
                 f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar):.3f} | "
                 f"π_min={pi_i.min().item():.3f} π_max={pi_i.max().item():.3f} | "
                 f"spearman(pi_vs_negCE)={_spearman_corr_torch(pi_i, -ce_vec):.3f}  "
-                f"pct_pi_below_0.2={(pi_i < 0.2).float().mean().item()*100:.1f}%  "
-                f"pct_pi_above_0.8={(pi_i > 0.8).float().mean().item()*100:.1f}%"
+                f"pct_pi_below_0.25={(pi_i < 0.25).float().mean().item()*100:.1f}%  "
+                f"pct_pi_above_0.75={(pi_i > 0.75).float().mean().item()*100:.1f}%"
             )
 
         # ----- now do optimizer.step() / scaler.step() -----
@@ -305,6 +317,9 @@ def train_arlvi_vanilla(
 
         # Step LR schedulers *per batch* (after optimizer.step)
         if schedulers is not None:
+            # capture current LRs used for THIS batch before stepping schedulers
+            lr_trace_bb.append(optim_backbone.param_groups[0]['lr'])
+            lr_trace_cls.append(optim_classifier.param_groups[0]['lr'])
             schedulers['backbone'].step()
             schedulers['classifier'].step()
 
@@ -326,11 +341,33 @@ def train_arlvi_vanilla(
         spearman_sum += rho
         spearman_cnt += 1
 
-        pct_low  = (pi_i < 0.2).float().mean().item()
-        pct_high = (pi_i > 0.8).float().mean().item()
+        pct_low  = (pi_i < 0.25).float().mean().item()
+        pct_high = (pi_i > 0.75).float().mean().item()
         pct_low_sum  += pct_low
         pct_high_sum += pct_high
         pct_cnt      += 1
+
+        # π→correctness accumulation (per batch)
+        with torch.no_grad():
+            preds = logits.argmax(1)
+            correct_mask = preds.eq(labels)
+            p = pi_i
+
+            m0 = p < bin_lo
+            m1 = (p >= bin_lo) & (p <= bin_hi)
+            m2 = p > bin_hi
+
+            pi_bin_totals[0]  += int(m0.sum().item())
+            pi_bin_totals[1]  += int(m1.sum().item())
+            pi_bin_totals[2]  += int(m2.sum().item())
+
+            if m0.any():
+                pi_bin_correct[0] += int(correct_mask[m0].sum().item())
+            if m1.any():
+                pi_bin_correct[1] += int(correct_mask[m1].sum().item())
+            if m2.any():
+                pi_bin_correct[2] += int(correct_mask[m2].sum().item())
+
 
     # ----------------- Once-per-epoch φ step (if chosen) -----------------
     if update_inference_every == "epoch":
@@ -374,6 +411,21 @@ def train_arlvi_vanilla(
     rho_epoch     = spearman_sum / max(1, spearman_cnt)
     pct_low_epoch = (pct_low_sum  / max(1, pct_cnt)) * 100.0
     pct_high_epoch= (pct_high_sum / max(1, pct_cnt)) * 100.0
+        # finalize π→correctness bins
+    def _safe_div(a: int, b: int) -> float:
+        return (a / b) if b > 0 else 0.0
+
+    pi_acc_bins = {
+        "lt_0.25":  _safe_div(pi_bin_correct[0], pi_bin_totals[0]),
+        "0.25_0.75": _safe_div(pi_bin_correct[1], pi_bin_totals[1]),
+        "gt_0.75":  _safe_div(pi_bin_correct[2], pi_bin_totals[2]),
+    }
+    pi_bin_counts = {
+        "lt_0.25":  int(pi_bin_totals[0]),
+        "0.25_0.75": int(pi_bin_totals[1]),
+        "gt_0.75":  int(pi_bin_totals[2]),
+    }
+
 
     diag = {
         "grad_backbone":   grad_bb,
@@ -383,9 +435,19 @@ def train_arlvi_vanilla(
         "pi_bar": float(pi_bar_running) if pi_bar_running is not None else 0.0,
         # extras
         "spearman_rank_pi_vs_negCE": float(rho_epoch),     # Rank correlation between π and -CE
-        "percent_pi_below_0.2":      float(pct_low_epoch), # % samples with π < 0.2 (likely corrupt)
-        "percent_pi_above_0.8":      float(pct_high_epoch) # % samples with π > 0.8 (likely clean)
+        "percent_pi_below_0.25":      float(pct_low_epoch), # % samples with π < 0.25 (likely corrupt)
+        "percent_pi_above_0.75":      float(pct_high_epoch) # % samples with π > 0.75 (likely clean)
     }
+
+    # attach LR traces and π→correctness to diag
+    diag.update({
+        "lr_trace_backbone":   lr_trace_bb,
+        "lr_trace_classifier": lr_trace_cls,
+        "pi_acc_bins":         pi_acc_bins,
+        "pi_bin_counts":       pi_bin_counts,
+        "pi_bins":             (bin_lo, bin_hi),
+    })
+
 
     if return_diag:
         return ce_epoch, kl_epoch, acc_epoch, diag
