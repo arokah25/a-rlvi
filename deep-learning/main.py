@@ -71,6 +71,11 @@ parser.add_argument('--eval_val_every',  type=int, default=1,
                     help='run val set every N epochs (−1 = never)')
 parser.add_argument('--eval_test_every', type=int, default=1,
                     help='run test set every N epochs (−1 = never)')
+parser.add_argument('--early_stop', action='store_true',
+                    help='Enable early stopping on validation accuracy')
+parser.add_argument('--early_stop_patience', type=int, default=8,
+                    help='Stop if val acc does not improve for N epochs')
+
 
 ###---###
 parser.add_argument('--n_epoch', type=int, help='number of epochs for training', default=80)
@@ -306,7 +311,7 @@ if args.dataset == "food101":
     transforms.RandomResizedCrop(224, scale=(0.6, 1.0), interpolation=InterpolationMode.BILINEAR),
     transforms.RandomHorizontalFlip(p=0.5),
     # soften aug for diagnostics:
-    transforms.ColorJitter(0.1, 0.1, 0.1, 0.02),
+    #transforms.ColorJitter(0.1, 0.1, 0.1, 0.02),
     transforms.ToTensor(),
     normalize,
     ])
@@ -430,6 +435,26 @@ def set_bn_eval(m: torch.nn.Module):
     if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
         m.eval()
 
+def _save_checkpoint(path, *,
+                     model_features, model_classifier, inference_net,
+                     optim_backbone=None, optim_classifier=None, optim_inference=None,
+                     schedulers=None, epoch:int=0, val_acc:float=float('-inf')):
+    to_save = {
+        'epoch': epoch,
+        'val_acc': val_acc,
+        'model_features': model_features.state_dict(),
+        'model_classifier': model_classifier.state_dict(),
+        'inference_net': inference_net.state_dict(),
+    }
+    if optim_backbone is not None:
+        to_save['optim_backbone'] = optim_backbone.state_dict()
+    if optim_classifier is not None:
+        to_save['optim_classifier'] = optim_classifier.state_dict()
+    if optim_inference is not None:
+        to_save['optim_inference'] = optim_inference.state_dict()
+    if schedulers is not None:
+        to_save['schedulers'] = {k: v.state_dict() for k, v in schedulers.items()}
+    torch.save(to_save, path)
 
 
 def run():
@@ -557,7 +582,7 @@ def run():
             optim_backbone,
             max_lr=1e-3,              # ~2× base LR for bb
             div_factor=10.0,
-            final_div_factor=1e3,
+            final_div_factor=1e4,
             pct_start=max(0.05, args.warmup_epochs / args.n_epoch),  # tiny ramp is fine
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
@@ -566,13 +591,15 @@ def run():
             optim_classifier,
             max_lr=4e-3,              # ~2× head base LR
             div_factor=10.0,
-            final_div_factor=1e2,
+            final_div_factor=5e3,
             pct_start=max(0.05, args.warmup_epochs / args.n_epoch),
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
         )
 
         schedulers = {"backbone": scheduler_backbone, "classifier": scheduler_classifier}
+
+
 
 
 
@@ -622,6 +649,12 @@ def run():
 
 
     # Training
+    #for early stopping
+    best_val = float('-inf')
+    epochs_no_improve = 0
+    ckpt_path = os.path.join(save_dir, f'best_s{args.seed}.pt')
+
+
     # Vector of class-specific priors, initialized to 0.75
     pi_bar_class = torch.full((101,), 0.75, dtype=torch.float32).to(DEVICE)
 
@@ -741,6 +774,7 @@ def run():
 
             epoch_time = time.time() - start_time
 
+
             v = "—" if val_acc is None else f"{val_acc:.2f}%"
             t = "—" if test_acc is None else f"{test_acc:.2f}%"
 
@@ -755,11 +789,12 @@ def run():
             if last_pi_acc_bins is not None:
                 lo, hi = diag.get('pi_bins', (0.25, 0.75))
                 print(
-                    f"    π→acc by bin:  "
-                    f"<{lo:.1f} = {last_pi_acc_bins['lt_0.25']*100:.2f}% (n={last_pi_bin_counts['lt_0.25']}),  "
-                    f"{lo:.1f}–{hi:.1f} = {last_pi_acc_bins['0.25_0.75']*100:.2f}% (n={last_pi_bin_counts['0.25_0.75']}),  "
-                    f">{hi:.1f} = {last_pi_acc_bins['gt_0.75']*100:.2f}% (n={last_pi_bin_counts['gt_0.75']})"
-                )
+                f"    π→acc by bin:  "
+                f"<{lo:.2f} = {last_pi_acc_bins['lt_0.25']*100:.2f}% (n={last_pi_bin_counts['lt_0.25']}),  "
+                f"{lo:.2f}–{hi:.2f} = {last_pi_acc_bins['0.25_0.75']*100:.2f}% (n={last_pi_bin_counts['0.25_0.75']}),  "
+                f">{hi:.2f} = {last_pi_acc_bins['gt_0.75']*100:.2f}% (n={last_pi_bin_counts['gt_0.75']})"
+            )
+
 
 
 
@@ -794,6 +829,37 @@ def run():
             train_acc = methods.train_bare(train_loader, model, optimizer, num_classes)
             val_acc = utils.evaluate(val_loader, model)
 
+        # === EARLY STOPPING  ===
+        if args.early_stop and (val_loader is not None):
+            # If you already computed val_acc this epoch, reuse it; otherwise compute it now.
+            _es_val = val_acc if ('val_acc' in locals() and val_acc is not None) else utils.evaluate(val_loader, model)
+
+            if _es_val > best_val:  # any improvement counts
+                best_val = _es_val
+                epochs_no_improve = 0
+                _save_checkpoint(
+                    ckpt_path,
+                    model_features=model_features,
+                    model_classifier=model_classifier,
+                    inference_net=inference_net,
+                    optim_backbone=optim_backbone,
+                    optim_classifier=optim_classifier,
+                    optim_inference=optimizer_inf,
+                    schedulers=schedulers,
+                    epoch=epoch,
+                    val_acc=best_val
+                )
+                print(f"[ES] New best val acc: {best_val:.2f}% — checkpoint saved.")
+            else:
+                epochs_no_improve += 1
+                print(f"[ES] No improvement ({epochs_no_improve}/{args.early_stop_patience}). "
+                    f"Best={best_val:.2f}%")
+
+                if epochs_no_improve >= args.early_stop_patience:
+                    print("[ES] Patience exhausted. Stopping training early.")
+                    break
+        # === END EARLY STOPPING ===
+
 
         #### Finish one epoch of training with selected method ####
 
@@ -824,7 +890,31 @@ def run():
                          + f"{clean*100:.2f}\t{corr*100:.2f}\t"
                          + f"{train_acc:8.4f}\t{val_acc:8.4f}\t{test_acc:8.4f}\n")
 """
-    # <<< ADD THIS WHOLE BLOCK AFTER THE FOR-LOOP, STILL INSIDE run() >>>
+
+        # Restore best checkpoint if we used early stopping
+    if args.early_stop and os.path.isfile(ckpt_path):
+        state = torch.load(ckpt_path, map_location=DEVICE)
+        model_features.load_state_dict(state['model_features'])
+        model_classifier.load_state_dict(state['model_classifier'])
+        inference_net.load_state_dict(state['inference_net'])
+        if 'schedulers' in state and ('schedulers' in locals()) and (schedulers is not None):
+            for k, sch in schedulers.items():
+                if k in state['schedulers']:
+                    sch.load_state_dict(state['schedulers'][k])
+        if 'optim_backbone' in state:   optim_backbone.load_state_dict(state['optim_backbone'])
+        if 'optim_classifier' in state: optim_classifier.load_state_dict(state['optim_classifier'])
+        if 'optim_inference' in state:  optimizer_inf.load_state_dict(state['optim_inference'])
+        print(f"[ES] Restored best model from epoch {state.get('epoch','?')} "
+            f"with val acc {state.get('val_acc',0):.2f}%")
+
+    if os.path.exists(ckpt_path):
+        state = torch.load(ckpt_path, map_location=DEVICE)
+        model_features.load_state_dict(state['model_features'])
+        model_classifier.load_state_dict(state['model_classifier'])
+        inference_net.load_state_dict(state['inference_net'])
+        final_test = utils.evaluate(test_loader, model)
+        print(f"Loaded best checkpoint (epoch {state['epoch']}, val={state['val_acc']:.2f}%) → test={final_test:.2f}%")
+
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
 
