@@ -99,6 +99,14 @@ hist_ce, hist_kl = [], []
 hist_grad_bb, hist_grad_cls, hist_grad_inf = [], [], []
 hist_pi_min, hist_pi_max, hist_pi_mean = [], [], []
 
+# LR traces (flat over all batches)
+hist_lr_bb, hist_lr_cls = [], []
+# π→correctness (store the most recent epoch's bins for plotting/printing)
+last_pi_acc_bins, last_pi_bin_counts = None, None
+last_pi_bins = (0.25, 0.75)
+
+
+
 
 
 if torch.backends.mps.is_available():
@@ -132,7 +140,7 @@ def pi_stats(model_features, inference_net, loader, device):
             all_pi.append(inference_net(z).cpu())
     pi = torch.cat(all_pi)
     mean_pi   = pi.mean().item()
-    extreme   = ((pi < 0.2) | (pi > 0.8)).float().mean().item()
+    extreme   = ((pi < 0.25) | (pi > 0.75)).float().mean().item()
     return mean_pi, extreme
 
 @torch.no_grad()
@@ -295,13 +303,12 @@ if args.dataset == "food101":
     ])"""
 
     transform_train = transforms.Compose([
-    transforms.RandomResizedCrop(224, scale=(0.5, 1.0),
-                                 interpolation=InterpolationMode.BILINEAR),
+    transforms.RandomResizedCrop(224, scale=(0.6, 1.0), interpolation=InterpolationMode.BILINEAR),
     transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(0.3, 0.3, 0.3, 0.05),       
+    # soften aug for diagnostics:
+    transforms.ColorJitter(0.1, 0.1, 0.1, 0.02),
     transforms.ToTensor(),
     normalize,
-    transforms.RandomErasing(p=0.15, scale=(0.02, 0.2)),  # (after normalize)
     ])
 
 
@@ -418,6 +425,12 @@ def group_params_for_wd(module):
         (no_decay if (is_bias or in_norm) else decay).append(p)
     return decay, no_decay
 
+def set_bn_eval(m: torch.nn.Module):
+    # Freeze BN running stats but keep gamma/beta trainable
+    if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
+        m.eval()
+
+
 
 def run():
     train_acc = 0.0
@@ -478,6 +491,8 @@ def run():
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
         model_classifier = backbone.fc
+        # >>> Freeze BN stats in the feature extractor <<<
+        model_features.apply(set_bn_eval)
         feature_dim = in_dim  # 2048 for ResNet50, 512 for ResNet18
 
         model = CombinedModel(model_features, model_classifier)
@@ -504,21 +519,23 @@ def run():
     hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
 
     # --- optimizers ---
-    optim_classifier = torch.optim.AdamW(
-        [
-            {'params': hd_decay,    'weight_decay': 8e-4},   
-            {'params': hd_no_decay, 'weight_decay': 0.0},
-        ],
-        lr=0.001
-    )
-
+    # --- optimizers (no freezing, both learn from step 0) ---
     optim_backbone = torch.optim.SGD(
         [
-            {'params': bb_decay,    'weight_decay': 1e-4},   # was 1e-4
+            {'params': bb_decay,    'weight_decay': 5e-5},   # a bit lighter WD
             {'params': bb_no_decay, 'weight_decay': 0.0},
         ],
-        lr=0.001, momentum=0.9, nesterov=True
+        lr=5e-4, momentum=0.9, nesterov=True
     )
+
+    optim_classifier = torch.optim.AdamW(
+        [
+            {'params': hd_decay,    'weight_decay': 2e-4},
+            {'params': hd_no_decay, 'weight_decay': 0.0},
+        ],
+        lr=2e-3   # 4× backbone LR
+    )
+
 
 
     optimizer_inf = torch.optim.Adam(
@@ -538,22 +555,23 @@ def run():
         steps_per_epoch = len(train_loader)
         scheduler_backbone = OneCycleLR(
             optim_backbone,
-            max_lr= args.lr_init * 0.5,            # peak LR for backbone
-            div_factor=10.0,       
-            final_div_factor=1e3,   
-            pct_start=args.warmup_epochs / args.n_epoch,
+            max_lr=1e-3,              # ~2× base LR for bb
+            div_factor=10.0,
+            final_div_factor=1e3,
+            pct_start=max(0.05, args.warmup_epochs / args.n_epoch),  # tiny ramp is fine
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
         )
         scheduler_classifier = OneCycleLR(
             optim_classifier,
-            max_lr=args.lr_init * 5,            # peak LR for head (AdamW)
-            div_factor=10.0,        # start at 1e-3
-            final_div_factor=1e2,   # end around 1e-5
-            pct_start=args.warmup_epochs / args.n_epoch,
+            max_lr=4e-3,              # ~2× head base LR
+            div_factor=10.0,
+            final_div_factor=1e2,
+            pct_start=max(0.05, args.warmup_epochs / args.n_epoch),
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
         )
+
         schedulers = {"backbone": scheduler_backbone, "classifier": scheduler_classifier}
 
 
@@ -610,6 +628,8 @@ def run():
 
     for epoch in range(1, args.n_epoch + 1):
         model.train()
+        # Keep BN layers using frozen running stats during training (re-apply each epoch)
+        model_features.apply(set_bn_eval)
 
         time_ep = time.time()
 
@@ -686,7 +706,7 @@ def run():
                 ema_alpha              = args.ema_alpha,
                 schedulers             = schedulers,
                 scaler                 = scaler,
-                grad_clip              = 5.0,          # (clip head only)
+                grad_clip              = None,          # (clip head only)
                 return_diag            = True
             )
 
@@ -700,6 +720,15 @@ def run():
             hist_pi_min.append(float(diag.get('pi_min', 0.0)))
             hist_pi_max.append(float(diag.get('pi_max', 0.0)))
             hist_pi_mean.append(float(diag.get('pi_mean', 0.0)))
+            
+            # LR traces (per batch of this epoch)
+            hist_lr_bb.extend(diag.get('lr_trace_backbone', []))
+            hist_lr_cls.extend(diag.get('lr_trace_classifier', []))
+
+            # π→correctness (for reporting/plotting)
+            last_pi_acc_bins   = diag.get('pi_acc_bins', None)
+            last_pi_bin_counts = diag.get('pi_bin_counts', None)
+
 
             val_acc  = None
             test_acc = None
@@ -722,6 +751,16 @@ def run():
                 f"π μ={hist_pi_mean[-1]:.3f} min={hist_pi_min[-1]:.2f} max={hist_pi_max[-1]:.2f} | "
                 f"train={train_acc*100:.2f}% val={v} test={t}"
             )
+
+            if last_pi_acc_bins is not None:
+                lo, hi = diag.get('pi_bins', (0.25, 0.75))
+                print(
+                    f"    π→acc by bin:  "
+                    f"<{lo:.1f} = {last_pi_acc_bins['lt_0.25']*100:.2f}% (n={last_pi_bin_counts['lt_0.25']}),  "
+                    f"{lo:.1f}–{hi:.1f} = {last_pi_acc_bins['0.25_0.75']*100:.2f}% (n={last_pi_bin_counts['0.25_0.75']}),  "
+                    f">{hi:.1f} = {last_pi_acc_bins['gt_0.75']*100:.2f}% (n={last_pi_bin_counts['gt_0.75']})"
+                )
+
 
 
         elif args.method == 'coteaching':
@@ -805,12 +844,35 @@ def run():
     plt.savefig(os.path.join(plot_dir, 'grad_norms.png'), dpi=150); plt.close()
 
     # π histogram (final)
-    if args.method in ['arlvi', 'arlvi_vanilla']:
+    if args.method in ['arlvi', 'arlvi_vanilla'] and 'model_features' in locals():
         pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
         plt.figure()
         plt.hist(pi_all, bins=50, range=(0.0, 1.0))
         plt.xlabel('π'); plt.ylabel('Count'); plt.title('π histogram (final)'); plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, 'pi_histogram.png'), dpi=150); plt.close()
+
+        # LR traces across training (per batch)
+    if len(hist_lr_bb) and len(hist_lr_cls):
+        plt.figure()
+        plt.plot(hist_lr_bb, label='Backbone LR')
+        plt.plot(hist_lr_cls, label='Head LR')
+        plt.xlabel('Training step'); plt.ylabel('LR'); plt.title('OneCycle LR traces'); plt.legend(); plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, 'lr_traces.png'), dpi=150); plt.close()
+
+    # π → correctness bars (last epoch's bins)
+    if last_pi_acc_bins is not None:
+        lo, hi = 0.25, 0.75
+        plt.figure()
+        bins = [f'<{lo:.2f}', f'{lo:.2f}–{hi:.2f}', f'>{hi:.2f}']
+        vals = [last_pi_acc_bins['lt_0.25']*100.0,
+                last_pi_acc_bins['0.25_0.75']*100.0,
+                last_pi_acc_bins['gt_0.75']*100.0]
+
+        plt.bar(bins, vals)
+        plt.ylim(0, 100)
+        plt.ylabel('Accuracy (%)'); plt.title('π → correctness (last epoch)'); plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, 'pi_to_correctness.png'), dpi=150); plt.close()
+
 
     print(f"Saved plots to: {plot_dir}")
 
