@@ -75,6 +75,12 @@ parser.add_argument('--early_stop', action='store_true',
                     help='Enable early stopping on validation accuracy')
 parser.add_argument('--early_stop_patience', type=int, default=8,
                     help='Stop if val acc does not improve for N epochs')
+parser.add_argument('--wd_backbone',  type=float, default=1e-4,
+                    help='Weight decay for backbone (decay params only)')
+parser.add_argument('--wd_head',      type=float, default=5e-4,
+                    help='Weight decay for classifier head (decay params only)')
+parser.add_argument('--wd_inference', type=float, default=1e-4,
+                    help='Weight decay for inference net')
 
 
 ###---###
@@ -299,22 +305,18 @@ if args.dataset == "food101":
                                     [0.229, 0.224, 0.225])
 
     # Common training pipeline for ImageNet-pretrained ResNet on Food-101
-    """transform_train = transforms.Compose([
+
+    transform_train = transforms.Compose([
     transforms.RandomResizedCrop(224, scale=(0.5, 1.0),
                                  interpolation=InterpolationMode.BILINEAR),
     transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ColorJitter(0.1, 0.1, 0.1, 0.02),
     transforms.ToTensor(),
+    # RandomErasing expects a tensor
+    transforms.RandomErasing(p=0.25, scale=(0.02, 0.2), ratio=(0.3, 3.3), value='random'),
     normalize,
-    ])"""
+])
 
-    transform_train = transforms.Compose([
-    transforms.RandomResizedCrop(224, scale=(0.6, 1.0), interpolation=InterpolationMode.BILINEAR),
-    transforms.RandomHorizontalFlip(p=0.5),
-    # soften aug for diagnostics:
-    #transforms.ColorJitter(0.1, 0.1, 0.1, 0.02),
-    transforms.ToTensor(),
-    normalize,
-    ])
 
 
     # Standard eval pipeline
@@ -545,9 +547,10 @@ def run():
 
     # --- optimizers ---
     # --- optimizers (no freezing, both learn from step 0) ---
+    # param groups already split by group_params_for_wd(...)
     optim_backbone = torch.optim.SGD(
         [
-            {'params': bb_decay,    'weight_decay': 5e-5},   # a bit lighter WD
+            {'params': bb_decay,    'weight_decay': args.wd_backbone},
             {'params': bb_no_decay, 'weight_decay': 0.0},
         ],
         lr=5e-4, momentum=0.9, nesterov=True
@@ -555,17 +558,19 @@ def run():
 
     optim_classifier = torch.optim.AdamW(
         [
-            {'params': hd_decay,    'weight_decay': 2e-4},
+            {'params': hd_decay,    'weight_decay': args.wd_head},
             {'params': hd_no_decay, 'weight_decay': 0.0},
         ],
-        lr=2e-3   # 4× backbone LR
+        lr=2e-3
     )
 
 
 
-    optimizer_inf = torch.optim.Adam(
+    
+    # Prefer AdamW for decoupled WD on the inference net too
+    optimizer_inf = torch.optim.AdamW(
         inference_net.parameters(),
-        lr=args.lr_inference, weight_decay=1e-4
+        lr=args.lr_inference, weight_decay=args.wd_inference
     )
 
 
