@@ -1,7 +1,6 @@
 from __future__ import annotations  # postpone evaluation of type hints (safer)
 from typing import Optional
 
-import math
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -92,7 +91,7 @@ def train_arlvi_vanilla(
     epoch:            int,
 
     # === The ONE knob ===
-    tau:              float = 1.0,              # temperature for q_i(τ)
+    tau:              float = 0.5,              # temperature for q_i(τ) (FIXED; no annealing)
 
     # === Stability knobs (fixed constants; not meant to be tuned) ===
     update_inference_every: str = "batch",      # 'batch' | 'epoch'
@@ -125,11 +124,7 @@ def train_arlvi_vanilla(
     model_classifier.train()
     inference_net.train()
 
-    # --- Rubber-band τ schedule (cosine): starts at 1.0 and smoothly decays to 0.45 by epoch 70. ---
-    _tau_max, _tau_min, _tau_end_ep = 1.0, 0.45, 40
-    _num = min(max(epoch - 1, 0), max(_tau_end_ep - 1, 1))
-    _den = max(_tau_end_ep - 1, 1)
-    tau_eff = _tau_min + 0.5 * (_tau_max - _tau_min) * (1.0 + math.cos(math.pi * _num / _den))
+    # (No τ annealing; τ is fixed by the function argument.)
 
     # Running stats over the epoch (for averages)
     ce_sum = kl_sum = 0.0            # sums of CE and KL terms (weighted as defined below)
@@ -202,7 +197,7 @@ def train_arlvi_vanilla(
             #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
             r_i = _zscore_detached(ce_vec)          # (B,) detached
             #    q_i(τ) := σ( - r_i / τ )  → lower-than-avg CE (easy) → q ≈ 1 (clean)
-            q_i = torch.sigmoid(-r_i / tau_eff)     # (B,) detached (r_i is detached)
+            q_i = torch.sigmoid(-r_i / tau)         # (B,) detached (r_i is detached)
 
             # 6) Slow global prior π̄  (scalar) via EMA of mean(π) per batch
             batch_mean_pi = pi_i.mean().detach()    # scalar (0-dim tensor), detached
@@ -303,7 +298,6 @@ def train_arlvi_vanilla(
                 f"spearman(pi_vs_negCE)={_spearman_corr_torch(pi_i, -ce_vec):.3f}  "
                 f"pct_pi_below_0.25={(pi_i < 0.25).float().mean().item()*100:.1f}%  "
                 f"pct_pi_above_0.75={(pi_i > 0.75).float().mean().item()*100:.1f}%"
-                f"tau_eff={tau_eff:.3f}  "
             )
 
         # ----- now do optimizer.step() / scaler.step() -----
