@@ -44,14 +44,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--result_dir', type=str, help = 'dir to save result txt files', default='results/')
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
-parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, arlvi_vanilla, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
+parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, arlvi_zscore, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 
 ###---for A-RLVI ---###
 parser.add_argument('--tau', type=float, default=1.0,
                     help='temperature for detached target q_i(τ)')
-parser.add_argument('--update_inference_every', type=str, choices=['batch', 'epoch'], default='batch')
 parser.add_argument('--beta', type=float, default=1.0,
-                    help='Weight for the KL divergence regularization term (vanilla A-RLVI)')
+                    help='Weight for the KL divergence regularization term (zscore A-RLVI)')
 
 parser.add_argument('--download', dest='download', action='store_true',
                     help='Download dataset if not present')
@@ -63,7 +62,6 @@ parser.add_argument('--warmup_epochs', type=int, default=2,
                     help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
 parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.05)
-parser.add_argument('--lr_inference', type=float, default=5e-5, help='Learning rate for the inference network (Adam)')
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
 parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.95)
@@ -112,6 +110,8 @@ hist_pi_min, hist_pi_max, hist_pi_mean = [], [], []
 
 # LR traces (flat over all batches)
 hist_lr_bb, hist_lr_cls = [], []
+# Test accuracy history (sampled only when we evaluate it)
+hist_test_epochs, hist_test_acc = [], []
 # π→correctness (store the most recent epoch's bins for plotting/printing)
 last_pi_acc_bins, last_pi_bin_counts = None, None
 last_pi_bins = (0.25, 0.75)
@@ -506,7 +506,7 @@ def run():
 
 
     # Prepare ARLVI*Food101 models and optimizers
-    if args.dataset == 'food101' and args.method in ['arlvi', 'arlvi_vanilla']:
+    if args.dataset == 'food101' and args.method in ['arlvi', 'arlvi_zscore', 'rlvi']:
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
         #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
@@ -531,9 +531,6 @@ def run():
     model.to(DEVICE)
 
     # -------------------------------------------------
-    # split params
-    backbone_params   = list(model_features.parameters())
-    classifier_params = list(model_classifier.parameters())
 
     #initialize inference network for ARLVI    
     #instantiate the inference network
@@ -548,73 +545,48 @@ def run():
     # --- optimizers ---
     # --- optimizers (no freezing, both learn from step 0) ---
     # param groups already split by group_params_for_wd(...)
-    optim_backbone = torch.optim.SGD(
+    # === Unified optimizer (AdamW) for backbone, head, and inference net ===
+    bb_decay,  bb_no_decay  = group_params_for_wd(model_features)
+    hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
+    inf_params = list(inference_net.parameters())
+
+    optim_all = torch.optim.AdamW(
         [
-            {'params': bb_decay,    'weight_decay': args.wd_backbone},
-            {'params': bb_no_decay, 'weight_decay': 0.0},
+            {'params': bb_decay,   'weight_decay': args.wd_backbone},  # backbone (decay)
+            {'params': bb_no_decay,'weight_decay': 0.0},               # backbone (no decay)
+            {'params': hd_decay,   'weight_decay': args.wd_head},      # head (decay)
+            {'params': hd_no_decay,'weight_decay': 0.0},               # head (no decay)
+            {'params': inf_params, 'weight_decay': args.wd_inference},  # inference net
         ],
-        lr=5e-4, momentum=0.9, nesterov=True
-    )
-
-    optim_classifier = torch.optim.AdamW(
-        [
-            {'params': hd_decay,    'weight_decay': args.wd_head},
-            {'params': hd_no_decay, 'weight_decay': 0.0},
-        ],
-        lr=2e-3
+        lr=1e-3  # base; OneCycle will shape per-group lrs via max_lr
     )
 
 
 
-    
-    # Prefer AdamW for decoupled WD on the inference net too
-    optimizer_inf = torch.optim.AdamW(
-        inference_net.parameters(),
-        lr=args.lr_inference, weight_decay=args.wd_inference
-    )
 
 
-    # pass both to train_arlvi as dict
+    # pass both to train_arlvi_zscore / train_rlvi as dict
     # ─── unified optimizer ────────────────────────────────
-    optimizer = {"backbone": optim_backbone, "classifier": optim_classifier}
+    optimizer = optim_all
 
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
-    if args.method in ['arlvi', 'arlvi_vanilla']:
-        # --- schedulers (per-batch step) ---
+    if args.method in ['arlvi', 'arlvi_zscore']:
+
         steps_per_epoch = len(train_loader)
-        scheduler_backbone = OneCycleLR(
-            optim_backbone,
-            max_lr=1e-3,              # ~2× base LR for bb
-            div_factor=10.0,
-            final_div_factor=1e4,
-            pct_start=max(0.05, args.warmup_epochs / args.n_epoch),  # tiny ramp is fine
-            steps_per_epoch=steps_per_epoch,
-            epochs=args.n_epoch
-        )
-        scheduler_classifier = OneCycleLR(
-            optim_classifier,
-            max_lr=4e-3,              # ~2× head base LR
+        # Per-group max LRs map to param group order above:
+        # [bb_decay, bb_no_decay, hd_decay, hd_no_decay, inf_params]
+        scheduler_all = OneCycleLR(
+            optim_all,
+            max_lr=[1e-3, 1e-3, 4e-3, 4e-3, 1e-3],
             div_factor=10.0,
             final_div_factor=5e3,
             pct_start=max(0.05, args.warmup_epochs / args.n_epoch),
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
-        )
-
-        schedulers = {"backbone": scheduler_backbone, "classifier": scheduler_classifier}
-
-
-
-
-
-
+            )
     else:
-        # MNIST/CIFAR fallback
-        if args.dataset == 'mnist':
-            scheduler = MultiplicativeLR(optimizer, utils.get_lr_factor)
-        else:
-            scheduler = CosineAnnealingLR(optimizer, T_max=200)
+        scheduler_all = None
 
 
     if args.method == 'jocor':
@@ -667,9 +639,14 @@ def run():
     for epoch in range(1, args.n_epoch + 1):
         model.train()
         # Keep BN layers using frozen running stats during training (re-apply each epoch)
-        model_features.apply(set_bn_eval)
+        if 'model_features' in locals():
+            model_features.apply(set_bn_eval)
 
         time_ep = time.time()
+        # Reset per-epoch eval placeholders so we never reuse stale values
+        val_acc = None
+        test_acc = None
+
 
         #### Start one epoch of training with selected method ####
 
@@ -689,64 +666,27 @@ def run():
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)
             test_acc = utils.evaluate(test_loader, model)
-            
-            
-        elif args.method == "arlvi":
-            # --- Train ARLVI ---
+
+
+        elif args.method == "arlvi_zscore":
             start_time = time.time()
-            ce_loss, kl_loss, train_acc, pi_bar_class = methods.train_arlvi(
-                    scaler              = scaler,                 # mixed-precision scaler
-                    model_features      = model_features,
-                    model_classifier    = model_classifier,
-                    inference_net       = inference_net,
-                    dataloader          = train_loader,
-                    optimizer           = optimizer,
-                    inference_optimizer = optimizer_inf,          # ← renamed
-                    device              = DEVICE,
-                    epoch               = epoch,
-                    lambda_kl           = args.lambda_kl,
-                    pi_bar              = 0.75,                   # scalar warm-up prior
-                    warmup_epochs       = args.warmup_epochs,
-                    alpha               = args.ema_alpha,
-                    pi_bar_class        = pi_bar_class,           # running tensor
-                    beta                = args.beta_entropy_reg,
-                    tau                 = 1,                    # leave default
-                    scheduler           = schedulers,             # ← pass the dict
-                    grad_clip           = 5.0,
-            )
-            
-            
-
-
-            # Check if overfitting has started
-            if not overfit:
-                if epoch > 2:
-                    # Overfitting started <=> validation score is dropping
-                    overfit = (val_acc < 0.5 * (val_acc_old + val_acc_old_old))
-                val_acc_old_old = val_acc_old
-                val_acc_old = val_acc
-
-        elif args.method == "arlvi_vanilla":
-            start_time = time.time()
-            # --- Train vanilla A-RLVI ---
-            ce_loss, kl_loss, train_acc, diag = methods.train_arlvi_vanilla(
+            # --- Train z-score target A-RLVI ---
+            ce_loss, kl_loss, train_acc, diag = methods.train_arlvi_zscore(
                 model_features         = model_features,
                 model_classifier       = model_classifier,
                 inference_net          = inference_net,
                 dataloader             = train_loader,
-                optim_backbone         = optim_backbone,
-                optim_classifier       = optim_classifier,
-                optim_inference        = optimizer_inf,
+                optim_all              = optim_all,       # << one optimizer
                 device                 = DEVICE,
                 epoch                  = epoch,
-                update_inference_every = args.update_inference_every,
                 tau                    = args.tau,
                 ema_alpha              = args.ema_alpha,
-                schedulers             = schedulers,
+                scheduler              = scheduler_all,   # << one scheduler (or None)
                 scaler                 = scaler,
-                grad_clip              = None,          # (clip head only)
+                grad_clip              = None,            # (clip head only; optional)
                 return_diag            = True
             )
+
 
 
             # histories + console print
@@ -776,6 +716,7 @@ def run():
 
             if args.eval_test_every > 0 and epoch % args.eval_test_every == 0:
                 test_acc = utils.evaluate(test_loader, model)
+
 
             epoch_time = time.time() - start_time
 
@@ -834,6 +775,18 @@ def run():
             train_acc = methods.train_bare(train_loader, model, optimizer, num_classes)
             val_acc = utils.evaluate(val_loader, model)
 
+        # --- Universal evals (schedule-driven; append exactly once per scheduled epoch) ---
+        if args.eval_val_every > 0 and (val_loader is not None) and (epoch % args.eval_val_every == 0):
+            if val_acc is None:
+                val_acc = utils.evaluate(val_loader, model)
+
+        if args.eval_test_every > 0 and (epoch % args.eval_test_every == 0):
+            if test_acc is None:
+                test_acc = utils.evaluate(test_loader, model)
+            hist_test_epochs.append(epoch)
+            hist_test_acc.append(float(test_acc))
+
+
         # === EARLY STOPPING  ===
         if args.early_stop and (val_loader is not None):
             # If you already computed val_acc this epoch, reuse it; otherwise compute it now.
@@ -847,10 +800,8 @@ def run():
                     model_features=model_features,
                     model_classifier=model_classifier,
                     inference_net=inference_net,
-                    optim_backbone=optim_backbone,
-                    optim_classifier=optim_classifier,
-                    optim_inference=optimizer_inf,
-                    schedulers=schedulers,
+                    optim_backbone=optim_all,     # unified optimizer
+                    schedulers={'all': scheduler_all} if scheduler_all is not None else None,
                     epoch=epoch,
                     val_acc=best_val
                 )
@@ -902,21 +853,26 @@ def run():
         model_features.load_state_dict(state['model_features'])
         model_classifier.load_state_dict(state['model_classifier'])
         inference_net.load_state_dict(state['inference_net'])
-        if 'schedulers' in state and ('schedulers' in locals()) and (schedulers is not None):
-            for k, sch in schedulers.items():
-                if k in state['schedulers']:
-                    sch.load_state_dict(state['schedulers'][k])
-        if 'optim_backbone' in state:   optim_backbone.load_state_dict(state['optim_backbone'])
-        if 'optim_classifier' in state: optim_classifier.load_state_dict(state['optim_classifier'])
-        if 'optim_inference' in state:  optimizer_inf.load_state_dict(state['optim_inference'])
+
+        if 'optim_backbone' in state:
+            optim_all.load_state_dict(state['optim_backbone'])
+
+        if 'schedulers' in state and scheduler_all is not None and 'all' in state['schedulers']:
+            scheduler_all.load_state_dict(state['schedulers']['all'])
+
         print(f"[ES] Restored best model from epoch {state.get('epoch','?')} "
             f"with val acc {state.get('val_acc',0):.2f}%")
+
 
     if os.path.exists(ckpt_path):
         state = torch.load(ckpt_path, map_location=DEVICE)
         model_features.load_state_dict(state['model_features'])
         model_classifier.load_state_dict(state['model_classifier'])
         inference_net.load_state_dict(state['inference_net'])
+        if 'optim_backbone' in state:
+            optim_all.load_state_dict(state['optim_backbone'])
+        if 'schedulers' in state and scheduler_all is not None and 'all' in state['schedulers']:
+            scheduler_all.load_state_dict(state['schedulers']['all'])
         final_test = utils.evaluate(test_loader, model)
         print(f"Loaded best checkpoint (epoch {state['epoch']}, val={state['val_acc']:.2f}%) → test={final_test:.2f}%")
 
@@ -939,7 +895,7 @@ def run():
     plt.savefig(os.path.join(plot_dir, 'grad_norms.png'), dpi=150); plt.close()
 
     # π histogram (final)
-    if args.method in ['arlvi', 'arlvi_vanilla'] and 'model_features' in locals():
+    if args.method in ['arlvi', 'arlvi_zscore'] and 'model_features' in locals():
         pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
         plt.figure()
         plt.hist(pi_all, bins=50, range=(0.0, 1.0))
@@ -967,6 +923,83 @@ def run():
         plt.ylim(0, 100)
         plt.ylabel('Accuracy (%)'); plt.title('π → correctness (last epoch)'); plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, 'pi_to_correctness.png'), dpi=150); plt.close()
+    
+
+    # If no scheduled test eval happened, add a final point so a plot is produced
+    if not len(hist_test_acc):
+        final_test = utils.evaluate(test_loader, model)
+        hist_test_epochs.append(epoch)  # last completed epoch index
+        hist_test_acc.append(float(final_test))
+
+    # Test accuracy over epochs (only at evaluation epochs)
+    if len(hist_test_acc):
+        plt.figure()
+        # Connect the sparse points with a line; x-axis is the true epoch index
+        plt.plot(hist_test_epochs, hist_test_acc, marker='o')
+        plt.xlabel('Epoch')
+        plt.ylabel('Test accuracy (%)')
+        plt.title('Test accuracy (evaluated every eval_test_every epochs)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, 'test_accuracy_over_epochs.png'), dpi=150)
+        plt.close()
+
+        # === Save this run's test-acc history and make overlays ===
+    import glob, numpy as _np
+
+    hist_dir = os.path.join(save_dir, "histories")
+    os.makedirs(hist_dir, exist_ok=True)
+
+    # Build a readable label for overlays
+    try:
+        arch = backbone.__class__.__name__  # e.g., ResNet50
+    except NameError:
+        arch = model.__class__.__name__     # fallback (e.g., CombinedModel or ResNet18)
+
+    run_label = f"{args.method}-{arch}-seed{args.seed}"
+    # Include tau if present (A-RLVI variants)
+    if hasattr(args, 'tau'):
+        run_label += f"-tau{args.tau}"
+
+    # Persist this run's curve
+    _np.savez(
+        os.path.join(hist_dir, f"test_acc_{run_label}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.npz"),
+        epochs=_np.array(hist_test_epochs, dtype=_np.int32),
+        acc=_np.array(hist_test_acc, dtype=_np.float32),
+        label=run_label,
+    )
+
+    # Overlay: all runs in THIS method folder
+    method_overlay = os.path.join(plot_dir, "test_accuracy_over_runs.png")
+    files = sorted(glob.glob(os.path.join(hist_dir, "test_acc_*.npz")))
+    if files:
+        plt.figure()
+        for f in files:
+            d = _np.load(f, allow_pickle=False)
+            lbl = str(d["label"]) if "label" in d.files else os.path.basename(f)
+            plt.plot(d["epochs"], d["acc"], marker='o', linewidth=1.5, label=lbl)
+        plt.xlabel('Epoch'); plt.ylabel('Test accuracy (%)')
+        plt.title(f'Test accuracy — {args.dataset}/{args.method}')
+        plt.legend(loc='best', fontsize=8)
+        plt.tight_layout()
+        plt.savefig(method_overlay, dpi=150); plt.close()
+
+    # Overlay: all methods for THIS dataset
+    dataset_hist_glob = os.path.join(args.result_dir, args.dataset, "*", "histories", "test_acc_*.npz")
+    files = sorted(glob.glob(dataset_hist_glob))
+    if files:
+        combined_dir = os.path.join(args.result_dir, args.dataset, "_combined_plots")
+        os.makedirs(combined_dir, exist_ok=True)
+        out_path = os.path.join(combined_dir, "test_accuracy_over_methods.png")
+        plt.figure()
+        for f in files:
+            d = _np.load(f, allow_pickle=False)
+            lbl = str(d["label"]) if "label" in d.files else os.path.basename(f)
+            plt.plot(d["epochs"], d["acc"], marker='o', linewidth=1.5, label=lbl)
+        plt.xlabel('Epoch'); plt.ylabel('Test accuracy (%)')
+        plt.title(f'Test accuracy — all methods ({args.dataset})')
+        plt.legend(loc='best', fontsize=8)
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=150); plt.close()
 
 
     print(f"Saved plots to: {plot_dir}")
