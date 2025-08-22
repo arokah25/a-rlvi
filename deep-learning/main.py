@@ -86,7 +86,7 @@ parser.add_argument('--n_epoch', type=int, help='number of epochs for training',
 parser.add_argument('--batch_size', type=int, help='batch size for training', default=64)
 
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=1e-4)
-parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0.25)
+parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
 parser.add_argument('--momentum', type=int, help='momentum', default=0.9)
 parser.add_argument('--print_freq', type=int, default=1)
@@ -550,19 +550,17 @@ def run():
     hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
     inf_params = list(inference_net.parameters())
 
-    optim_all = torch.optim.AdamW(
-        [
-            {'params': bb_decay,   'weight_decay': args.wd_backbone},  # backbone (decay)
-            {'params': bb_no_decay,'weight_decay': 0.0},               # backbone (no decay)
-            {'params': hd_decay,   'weight_decay': args.wd_head},      # head (decay)
-            {'params': hd_no_decay,'weight_decay': 0.0},               # head (no decay)
-            {'params': inf_params, 'weight_decay': args.wd_inference},  # inference net
-        ],
-        lr=1e-3  # base; OneCycle will shape per-group lrs via max_lr
-    )
+    param_groups = [
+    {'params': bb_decay,    'weight_decay': args.wd_backbone},
+    {'params': bb_no_decay, 'weight_decay': 0.0},
+    {'params': hd_decay,    'weight_decay': args.wd_head},
+    {'params': hd_no_decay, 'weight_decay': 0.0},
+    ]
+    
+    if args.method in ['arlvi_zscore']:
+        param_groups.append({'params': inf_params, 'weight_decay': args.wd_inference})
 
-
-
+    optim_all = torch.optim.AdamW(param_groups, lr=1e-3)
 
 
     # pass both to train_arlvi_zscore / train_rlvi as dict
@@ -836,9 +834,11 @@ def run():
             threshold = 0
             clean, corr = 1, 0
         # Check the number of correctly identified corrupted samples for RLVI
-        if (args.method == 'rlvi') and (args.noise_rate > 0):
+        if args.method == 'rlvi' and args.noise_rate > 0 and hasattr(train_dataset, 'noise_mask'):
             mask = (sample_weights > threshold).cpu()
             clean, corr = utils.get_ratio_corrupted(mask, train_dataset.noise_mask)
+        else:
+            clean, corr = 1, 0
 
         # Save logs to the file
         """with open(txtfile, "a") as myfile:
