@@ -70,12 +70,15 @@ class Food101(torch.utils.data.Dataset):
         else:
             self.indices = np.arange(len(self.images))
     # ------------------------------------------------------------
+    
     def __getitem__(self, i):
         real_idx = self.indices[i]
         img  = Image.open(self.images[real_idx]).convert("RGB")
         lbl  = self.labels[real_idx]
         if self.transform: img = self.transform(img)
-        return img, lbl, real_idx
+        return img, lbl, i, real_idx         
+
+
 
     def __len__(self):
         return len(self.indices)
