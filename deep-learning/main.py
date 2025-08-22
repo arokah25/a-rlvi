@@ -899,8 +899,12 @@ def run():
         pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
         plt.figure()
         plt.hist(pi_all, bins=50, range=(0.0, 1.0))
-        plt.xlabel('π'); plt.ylabel('Count'); plt.title('π histogram (final)'); plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, 'pi_histogram.png'), dpi=150); plt.close()
+        plt.xlabel('π')
+        plt.ylabel('Count')
+        plt.title(f'π histogram (final) — {args.method}')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, f'pi_histogram_{args.method}.png'), dpi=150)
+        plt.close()
 
         # LR traces across training (per batch)
     if len(hist_lr_bb) and len(hist_lr_cls):
