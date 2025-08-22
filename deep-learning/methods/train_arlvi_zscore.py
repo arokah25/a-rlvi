@@ -76,38 +76,27 @@ def _spearman_corr_torch(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 # -----------------------------------------------------------------------------
-# One-knob, bimodal, non-collapsing A-RLVI (single epoch, HEAVILY COMMENTED)
+# One-knob, bimodal, non-collapsing A-RLVI (single epoch)
 # -----------------------------------------------------------------------------
 def train_arlvi_zscore(
     *,
-    model_features:   torch.nn.Module,          # backbone   θ_bb
-    model_classifier: torch.nn.Module,          # classifier θ_cls
-    inference_net:    torch.nn.Module,          # f_φ: z -> π
+    model_features:   torch.nn.Module,
+    model_classifier: torch.nn.Module,
+    inference_net:    torch.nn.Module,
     dataloader:       torch.utils.data.DataLoader,
-    optim_backbone:   torch.optim.Optimizer,
-    optim_classifier: torch.optim.Optimizer,
-    optim_inference:  torch.optim.Optimizer,
+    optim_all:        torch.optim.Optimizer,
     device:           torch.device,
     epoch:            int,
-
-    # === The ONE knob ===
-    tau:              float = 0.5,              # temperature for q_i(τ) (FIXED; no annealing)
-
-    # === Stability knobs (fixed constants; not meant to be tuned) ===
-    update_inference_every: str = "batch",      # 'batch' | 'epoch'
-    ema_alpha:        float = 0.95,             # EMA coefficient for global prior π̄
-
-    # === (Optional) Mixed precision scaler ===
-    scaler:           'torch.cuda.amp.GradScaler|None' = None,  # if provided, used as explained below
-
-    # === Diagnostics / logging ===
+    tau:              float = 0.5,
+    ema_alpha:        float = 0.95,
+    scaler:           'torch.cuda.amp.GradScaler|None' = None,
     return_diag:      bool  = False,
     log_every:        int   = 200,
-    schedulers:       dict | None = None,
+    scheduler:        'torch.optim.lr_scheduler._LRScheduler|None' = None,
     grad_clip:        float | None = None,
-    pi_bins:         tuple[float, float] = (0.25, 0.75),
-
+    pi_bins:          tuple[float, float] = (0.25, 0.75),
 ):
+
     """
     Trains A-RLVI for ONE epoch with:
       - π-detached CE for θ-updates (breaks collapse loop),
@@ -138,7 +127,7 @@ def train_arlvi_zscore(
 
     # --- persistent counters for how many times we snapshot grads ---
     grad_snapshots = 0
-    inf_snapshots  = 0
+    inf_snapshots  = 0  # (kept for compatibility with diagnostics)
 
     # Keep a small sample of π values for histogram/diagnostics (memory-safe)
     pi_samples, pi_cap = [], 20_000
@@ -164,8 +153,7 @@ def train_arlvi_zscore(
     pi_bar_running: torch.Tensor | None = None  # will hold a 0-dim tensor on device
 
     # If doing once-per-epoch φ update, zero its grads up front
-    if update_inference_every == "epoch":
-        optim_inference.zero_grad(set_to_none=True)
+    # (Batch updates only with unified optimizer; no separate once-per-epoch φ step.)
 
     # ------------------------------
     # Mini-batch training loop
@@ -236,38 +224,19 @@ def train_arlvi_zscore(
             kl_term = (kl_to_q + kl_to_bar).sum()                    # scalar
 
         # ----------------- Backward / Optimizer steps -----------------
-        for opt in (optim_backbone, optim_classifier):
-            opt.zero_grad(set_to_none=True)
-        if update_inference_every == "batch":
-            optim_inference.zero_grad(set_to_none=True)
+        # Unified optimizer path: zero grads once, backprop once on (L_theta + L_phi)
+        optim_all.zero_grad(set_to_none=True)
 
         if scaler is not None and torch.cuda.is_available():
-            if update_inference_every == "batch":
-                # backward with scaling
-                scaler.scale(L_theta + L_phi).backward()
+            # backward with scaling
+            scaler.scale(L_theta + L_phi).backward()
 
-                # ---- UN-SCALE ONCE per optimizer (before any clipping or logging) ----
-                scaler.unscale_(optim_backbone)
-                scaler.unscale_(optim_classifier)
-                scaler.unscale_(optim_inference)
+            # ---- UN-SCALE ONCE before any clipping or logging ----
+            scaler.unscale_(optim_all)
 
-                # optional clipping (on unscaled grads)
-                if grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
-
-            else:
-                # (epoch mode) scale only the θ loss; φ is unscaled
-                scaler.scale(L_theta).backward()
-
-                # ---- UN-SCALE ONCE per optimizer (before any clipping or logging) ----
-                scaler.unscale_(optim_backbone)
-                scaler.unscale_(optim_classifier)
-
-                if grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
-
-                # φ loss backward without scaler in epoch mode
-                L_phi.backward()
+            # optional clipping (on unscaled grads)
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), grad_clip)
         else:
             (L_theta + L_phi).backward()
             if grad_clip is not None:
@@ -278,14 +247,12 @@ def train_arlvi_zscore(
             # measure without modifying grads (max_norm=inf is a no-op)
             total_norm_bb  = torch.nn.utils.clip_grad_norm_(model_features.parameters(),  float('inf'))
             total_norm_cls = torch.nn.utils.clip_grad_norm_(model_classifier.parameters(), float('inf'))
+            total_norm_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(),   float('inf'))
             grad_bb_sum  += float(total_norm_bb)
             grad_cls_sum += float(total_norm_cls)
+            grad_inf_sum += float(total_norm_inf)
             grad_snapshots += 1
-
-            if update_inference_every == "batch":
-                total_norm_inf = torch.nn.utils.clip_grad_norm_(inference_net.parameters(), float('inf'))
-                grad_inf_sum   += float(total_norm_inf)
-                inf_snapshots  += 1
+            inf_snapshots  += 1
 
             # Lightweight batch log
             tqdm.write(
@@ -302,28 +269,20 @@ def train_arlvi_zscore(
 
         # ----- now do optimizer.step() / scaler.step() -----
         if scaler is not None and torch.cuda.is_available():
-            if update_inference_every == "batch":
-                scaler.step(optim_backbone)
-                scaler.step(optim_classifier)
-                scaler.step(optim_inference)
-                scaler.update()
-            else:
-                scaler.step(optim_backbone)
-                scaler.step(optim_classifier)
-                scaler.update()
+            scaler.step(optim_all)
+            scaler.update()
         else:
-            optim_backbone.step()
-            optim_classifier.step()
-            if update_inference_every == "batch":
-                optim_inference.step()
+            optim_all.step()
 
         # Step LR schedulers *per batch* (after optimizer.step)
-        if schedulers is not None:
-            # capture current LRs used for THIS batch before stepping schedulers
-            lr_trace_bb.append(optim_backbone.param_groups[0]['lr'])
-            lr_trace_cls.append(optim_classifier.param_groups[0]['lr'])
-            schedulers['backbone'].step()
-            schedulers['classifier'].step()
+        if scheduler is not None:
+            # capture current LRs used for THIS batch before stepping scheduler
+            try:
+                lr_trace_bb.append(optim_all.param_groups[0]['lr'])  # backbone group
+                lr_trace_cls.append(optim_all.param_groups[2]['lr']) # head group
+            except Exception:
+                pass
+            scheduler.step()
 
         # ----------------- Stats / Diagnostics -----------------
         ce_sum += ce_term.item()
@@ -372,21 +331,7 @@ def train_arlvi_zscore(
 
 
     # ----------------- Once-per-epoch φ step (if chosen) -----------------
-    if update_inference_every == "epoch":
-        # Average φ-gradients across all batches (simple 1/T scale)
-        for p in inference_net.parameters():
-            if p.grad is not None:
-                p.grad.div_(len(dataloader))
-
-        if scaler is not None and torch.cuda.is_available():
-            # In epoch mode we accumulated unscaled grads for φ; step without scaler.
-            optim_inference.step()
-        else:
-            optim_inference.step()
-
-        # For diagnostics, grab a final grad norm snapshot for φ
-        grad_inf_sum  = sum((p.grad.norm().item() for p in inference_net.parameters() if p.grad is not None))
-        inf_snapshots = 1  # exactly one snapshot in epoch mode
+    # (Removed: unified optimizer updates φ per-batch; no extra epoch-level step.)
 
     # ----------------- Epoch averages -----------------
     ce_epoch  = ce_sum / n_seen
