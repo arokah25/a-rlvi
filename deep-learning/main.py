@@ -44,7 +44,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--result_dir', type=str, help = 'dir to save result txt files', default='results/')
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
-parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi, arlvi_zscore, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
+parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi_zscore, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 
 ###---for A-RLVI ---###
 parser.add_argument('--tau', type=float, default=1.0,
@@ -64,6 +64,8 @@ parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', d
 parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.05)
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
+parser.add_argument('--lr_inference', type=float, default=5e-5,
+                    help='Learning rate for the inference network (Adam)')
 parser.add_argument('--split_percentage', type=float, help="fraction of noisy train kept for training (rest goes to validation)", default=0.95)
 parser.add_argument('--eval_val_every',  type=int, default=1,
                     help='run val set every N epochs (−1 = never)')
@@ -439,7 +441,7 @@ def set_bn_eval(m: torch.nn.Module):
 
 def _save_checkpoint(path, *,
                      model_features, model_classifier, inference_net,
-                     optim_backbone=None, optim_classifier=None, optim_inference=None,
+                     optim_all=None, 
                      schedulers=None, epoch:int=0, val_acc:float=float('-inf')):
     to_save = {
         'epoch': epoch,
@@ -448,15 +450,12 @@ def _save_checkpoint(path, *,
         'model_classifier': model_classifier.state_dict(),
         'inference_net': inference_net.state_dict(),
     }
-    if optim_backbone is not None:
-        to_save['optim_backbone'] = optim_backbone.state_dict()
-    if optim_classifier is not None:
-        to_save['optim_classifier'] = optim_classifier.state_dict()
-    if optim_inference is not None:
-        to_save['optim_inference'] = optim_inference.state_dict()
+    if optim_all is not None:
+        to_save['optim_all'] = optim_all.state_dict()   # <-- save under 'optim_all'
     if schedulers is not None:
         to_save['schedulers'] = {k: v.state_dict() for k, v in schedulers.items()}
     torch.save(to_save, path)
+
 
 
 def run():
@@ -506,7 +505,7 @@ def run():
 
 
     # Prepare ARLVI*Food101 models and optimizers
-    if args.dataset == 'food101' and args.method in ['arlvi', 'arlvi_zscore', 'rlvi']:
+    if args.dataset == 'food101' and args.method in ['arlvi_zscore', 'rlvi']:
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
         #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
@@ -536,12 +535,6 @@ def run():
     #instantiate the inference network
     inference_net = InferenceNet(feature_dim).to(DEVICE)
     
-
-    # --- Optimizers: backbone (SGD+Nesterov), head (AdamW), inference (Adam) ---
-    # --- param groups (yours) ---
-    bb_decay,  bb_no_decay  = group_params_for_wd(model_features)
-    hd_decay,  hd_no_decay  = group_params_for_wd(model_classifier)
-
     # --- optimizers ---
     # --- optimizers (no freezing, both learn from step 0) ---
     # param groups already split by group_params_for_wd(...)
@@ -569,7 +562,7 @@ def run():
 
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
-    if args.method in ['arlvi', 'arlvi_zscore']:
+    if args.method in ['arlvi_zscore']:
 
         steps_per_epoch = len(train_loader)
         # Per-group max LRs map to param group order above:
@@ -606,21 +599,12 @@ def run():
             scheduler_sec = CosineAnnealingLR(optimizer_sec, T_max=200)
     
 
-    if args.method in ['rlvi', 'arlvi']:
+    if args.method in ['rlvi', 'arlvi_zscore']:
         sample_weights = torch.ones(len(train_dataset)).to(DEVICE)
         residuals = torch.zeros_like(sample_weights).to(DEVICE)
         overfit = False
         threshold = 0
         val_acc_old, val_acc_old_old = 0, 0
-
-
-    # Evaluate init model
-    #test_acc = utils.evaluate(test_loader, model)
-    #utils.output_table(epoch=0, n_epoch=args.n_epoch, test_acc=test_acc)
-    #with open(txtfile, "a") as myfile:
-    #    myfile.write("epoch:\ttime_ep\ttau\tfix\tclean,%\tcorr,%\ttrain_acc\tval_acc\ttest_acc\n")
-    #    myfile.write(f"0:\t0\t0\t{False}\t100\t0\t0\t0\t{test_acc:8.4f}\n")
-
 
 
     # Training
@@ -798,7 +782,7 @@ def run():
                     model_features=model_features,
                     model_classifier=model_classifier,
                     inference_net=inference_net,
-                    optim_backbone=optim_all,     # unified optimizer
+                    optim_all=optim_all,     # unified optimizer
                     schedulers={'all': scheduler_all} if scheduler_all is not None else None,
                     epoch=epoch,
                     val_acc=best_val
@@ -854,8 +838,8 @@ def run():
         model_classifier.load_state_dict(state['model_classifier'])
         inference_net.load_state_dict(state['inference_net'])
 
-        if 'optim_backbone' in state:
-            optim_all.load_state_dict(state['optim_backbone'])
+        if 'optim_all' in state:
+            optim_all.load_state_dict(state['optim_all'])
 
         if 'schedulers' in state and scheduler_all is not None and 'all' in state['schedulers']:
             scheduler_all.load_state_dict(state['schedulers']['all'])
@@ -869,8 +853,8 @@ def run():
         model_features.load_state_dict(state['model_features'])
         model_classifier.load_state_dict(state['model_classifier'])
         inference_net.load_state_dict(state['inference_net'])
-        if 'optim_backbone' in state:
-            optim_all.load_state_dict(state['optim_backbone'])
+        if 'optim_all' in state:
+            optim_all.load_state_dict(state['optim_all'])
         if 'schedulers' in state and scheduler_all is not None and 'all' in state['schedulers']:
             scheduler_all.load_state_dict(state['schedulers']['all'])
         final_test = utils.evaluate(test_loader, model)
@@ -895,7 +879,7 @@ def run():
     plt.savefig(os.path.join(plot_dir, 'grad_norms.png'), dpi=150); plt.close()
 
     # π histogram (final)
-    if args.method in ['arlvi', 'arlvi_zscore'] and 'model_features' in locals():
+    if args.method in ['arlvi_zscore'] and 'model_features' in locals():
         pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
         plt.figure()
         plt.hist(pi_all, bins=50, range=(0.0, 1.0))
