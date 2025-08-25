@@ -90,7 +90,7 @@ parser.add_argument('--batch_size', type=int, help='batch size for training', de
 parser.add_argument('--wd', type=float, help='Weight decay for optimizer', default=1e-4)
 parser.add_argument('--noise_rate', type=float, help='corruption rate, should be less than 1', default=0)
 parser.add_argument('--noise_type', type=str, help='[pairflip, symmetric, asymmetric, instance]', default='pairflip')
-parser.add_argument('--momentum', type=int, help='momentum', default=0.9)
+parser.add_argument('--momentum', type=float, help='momentum', default=0.9)
 parser.add_argument('--print_freq', type=int, default=1)
 parser.add_argument('--num_workers', type=int, default=4, help='number of subprocesses for data loading')
 parser.add_argument('--seed', type=int, default=1)
@@ -517,9 +517,13 @@ def run():
         # Split the model into a feature extractor and classifier
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
         model_classifier = backbone.fc
-        # >>> Freeze BN stats in the feature extractor <<<
-        model_features.apply(set_bn_eval)
+
+        # >>> Freeze BN stats only for A-RLVI. Keep BN trainable for RLVI. <<<
+        if args.method in ['arlvi_zscore']:
+            model_features.apply(set_bn_eval)
+
         feature_dim = in_dim  # 2048 for ResNet50, 512 for ResNet18
+        
 
         model = CombinedModel(model_features, model_classifier)
 
@@ -554,6 +558,24 @@ def run():
         param_groups.append({'params': inf_params, 'weight_decay': args.wd_inference})
 
     optim_all = torch.optim.AdamW(param_groups, lr=1e-3)
+
+    # Use a smaller LR for the pretrained backbone, larger LR for the new head.
+    lr_bb = args.lr_init * 0.3
+    lr_hd = args.lr_init * 3.0
+
+    param_groups = [
+        {'params': bb_decay,    'weight_decay': args.wd_backbone, 'lr': lr_bb},
+        {'params': bb_no_decay, 'weight_decay': 0.0,              'lr': lr_bb},
+        {'params': hd_decay,    'weight_decay': args.wd_head,     'lr': lr_hd},
+        {'params': hd_no_decay, 'weight_decay': 0.0,              'lr': lr_hd},
+    ]
+
+    if args.method in ['arlvi_zscore']:
+        # inference net (only used by A-RLVI(zscore))
+        param_groups.append({'params': inf_params, 'weight_decay': args.wd_inference, 'lr': args.lr_inference})
+
+    optim_all = torch.optim.AdamW(param_groups, lr=args.lr_init)
+
 
 
     # pass both to train_arlvi_zscore / train_rlvi as dict
@@ -620,8 +642,8 @@ def run():
 
     for epoch in range(1, args.n_epoch + 1):
         model.train()
-        # Keep BN layers using frozen running stats during training (re-apply each epoch)
-        if 'model_features' in locals():
+        # Keep BN layers (for A-RLVI) using frozen running stats during training (re-apply each epoch)
+        if 'model_features' in locals() and args.method in ['arlvi_zscore']:
             model_features.apply(set_bn_eval)
 
         time_ep = time.time()
@@ -638,16 +660,23 @@ def run():
 
         elif args.method == "rlvi":
             start_time = time.time()
-            # --- Train RLVI ---
             train_acc, threshold, train_loss = methods.train_rlvi(
-            train_loader, model, optimizer,
-            residuals, sample_weights, overfit, threshold, 
-            writer=None, epoch=epoch
+                train_loader, model, optimizer,
+                residuals, sample_weights, overfit, threshold, 
+                writer=None, epoch=epoch
             )
 
             epoch_time = time.time() - start_time
-            val_acc = utils.evaluate(val_loader, model)
-            test_acc = utils.evaluate(test_loader, model)
+            val_acc = utils.evaluate(val_loader, model)    # computed every epoch
+            test_acc = utils.evaluate(test_loader, model)  # computed every epoch
+
+            # Print once with everything
+            print(
+                f"[rlvi] ep {epoch:03d} | time={epoch_time:.1f}s | "
+                f"train={train_acc*100:.2f}% | val={val_acc:.2f}% | test={test_acc:.2f}% | "
+                f"π̄={sample_weights.mean().item():.3f}"
+            )
+
 
 
         elif args.method == "arlvi_zscore":
@@ -879,7 +908,7 @@ def run():
     plt.savefig(os.path.join(plot_dir, 'grad_norms.png'), dpi=150); plt.close()
 
     # π histogram (final)
-    if args.method in ['arlvi_zscore'] and 'model_features' in locals():
+    if args.method == 'arlvi_zscore' and 'model_features' in locals():
         pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
         plt.figure()
         plt.hist(pi_all, bins=50, range=(0.0, 1.0))
@@ -889,6 +918,19 @@ def run():
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, f'pi_histogram_{args.method}.png'), dpi=150)
         plt.close()
+
+    elif args.method == 'rlvi':
+        # sample_weights is the RLVI π vector
+        pi_all = sample_weights.detach().cpu().numpy()
+        plt.figure()
+        plt.hist(pi_all, bins=50, range=(0.0, 1.0))
+        plt.xlabel('π')
+        plt.ylabel('Count')
+        plt.title('π histogram (final) — RLVI')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, 'pi_histogram_rlvi.png'), dpi=150)
+        plt.close()
+
 
         # LR traces across training (per batch)
     if len(hist_lr_bb) and len(hist_lr_cls):
