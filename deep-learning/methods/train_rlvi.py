@@ -1,7 +1,8 @@
 import torch
 from torch.nn import functional as F
-from torch.autograd import Variable
 from utils import accuracy
+from tqdm.auto import tqdm
+
 
 
 __all__ = ['train_rlvi']
@@ -35,8 +36,6 @@ def update_sample_weights(residuals, weights, tol=1e-3, maxiter=40):
         avg_weight = weights.mean()
         if error < tol:
             break
-    weights.div_(weights.max())
-
 
 def false_negative_criterion(weights, alpha=0.05):
     '''Find threshold from the fixed probability (alpha) of type II error'''
@@ -80,28 +79,42 @@ def train_rlvi(train_loader, model, optimizer,
     total_loss = 0.0
     total_seen = 0
 
-    for (images, labels, indexes) in train_loader:
-      
-        images = Variable(images).to(DEVICE)
-        labels = Variable(labels).to(DEVICE)
-        
-        logits = model(images)
-        prec, _ = accuracy(logits, labels, topk=(1, 5))
-        train_total += 1
-        train_correct += prec
+    progress = tqdm(train_loader, desc=f"RLVI epoch {epoch}", leave=False)
+    for images, labels, indexes in progress:
 
-        loss = F.cross_entropy(logits, labels, reduction='none')
-        residuals[indexes] = loss  # save the losses on the current batch
-        
+        images = images.to(DEVICE, non_blocking=True)
+        labels = labels.to(DEVICE, non_blocking=True)
+
+        logits = model(images)
+
+        # Count-based accuracy (robust and easy to read)
+        with torch.no_grad():
+            preds = logits.argmax(dim=1)
+            train_correct += (preds == labels).sum().item()
+            train_total   += labels.size(0)
+
+        # Per-sample CE, then weight by current π (weights)
+        loss_vec = F.cross_entropy(logits, labels, reduction='none')
+        residuals[indexes] = loss_vec.detach()  # store raw CE for the fixed-point
         batch_weights = weights[indexes]
-        loss = loss * batch_weights  # modify loss with Bernoulli probabilities
-        loss = loss.mean()
-        optimizer.zero_grad()
+
+        loss = (loss_vec * batch_weights).mean()
+
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * images.size(0)
         total_seen += images.size(0)
+
+        # Live progress
+        running_acc = 100.0 * train_correct / max(1, train_total)
+        progress.set_postfix(
+            loss=f"{loss.item():.3f}",
+            acc=f"{running_acc:.2f}%",
+            pi_mean=f"{weights.mean().item():.3f}"
+        )
+
 
     update_sample_weights(residuals, weights)
     if overfit:
