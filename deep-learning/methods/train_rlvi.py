@@ -13,29 +13,24 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @torch.no_grad()
-def update_sample_weights(residuals, weights, tol=1e-3, maxiter=40):
+def update_sample_weights(residuals, weights, pi_bar_prev):
     """
-    Optimize Bernoulli probabilities
-    
-    Parameters
-    ----------
-        residuals : array,
-            shape: len(train_loader) - cross-entropy loss for each training sample.
-        weights : array,
-            shape: len(train_loader) - Bernoulli probabilities pi: pi_i = probability that sample i is non-corrupted.
-            Updated inplace.
+    One-shot RLVI fixed-point update with ε eliminated:
+        π_i = (ratio * exp(-ℓ_i)) / (1 + ratio * exp(-ℓ_i)),
+    where ratio = ⟨π⟩/(1-⟨π⟩) and ℓ_i is per-sample CE (no shifting).
     """
-    residuals.sub_(residuals.min())
-    exp_res = torch.exp(-residuals)
-    avg_weight = 0.95
-    for _ in range(maxiter):
-        ratio = avg_weight / (1 - avg_weight)
-        new_weights = torch.div(ratio * exp_res, 1 + ratio * exp_res)
-        error = torch.norm(new_weights - weights)
-        weights[:] = new_weights
-        avg_weight = weights.mean()
-        if error < tol:
-            break
+    # ratio = ⟨π⟩ / (1 - ⟨π⟩), keep it inside (0, ∞)
+    pi_bar_prev = float(max(1e-6, min(1 - 1e-6, pi_bar_prev)))
+    ratio = pi_bar_prev / (1.0 - pi_bar_prev)
+
+    # guard only for numeric overflow of exp, not a heuristic
+    exp_neg_loss = torch.exp((-residuals).clamp(min=-20.0, max=20.0))
+
+    new_w = (ratio * exp_neg_loss) / (1.0 + ratio * exp_neg_loss)
+    new_w = new_w.clamp_(1e-8, 1 - 1e-8)  # keep in (0,1) as Bernoulli probs
+    weights.copy_(new_w)
+    return float(weights.mean().item())
+
 
 def false_negative_criterion(weights, alpha=0.05):
     '''Find threshold from the fixed probability (alpha) of type II error'''
@@ -49,8 +44,9 @@ def false_negative_criterion(weights, alpha=0.05):
 
 
 def train_rlvi(train_loader, model, optimizer,
-               residuals, weights, overfit, threshold, 
-               writer=None, epoch=None):
+               residuals, weights, overfit, threshold,
+               writer=None, epoch=None, pi_bar=None):
+
     """
     Train one epoch: apply SGD updates using Bernoulli probabilities. 
     Thus, optimize variational bound of the marginal likelihood 
@@ -116,7 +112,8 @@ def train_rlvi(train_loader, model, optimizer,
         )
 
 
-    update_sample_weights(residuals, weights)
+    pi_bar_next = update_sample_weights(residuals, weights, pi_bar_prev=pi_bar)
+
     if overfit:
         # Regularization: truncate samples with high probability of corruption
         threshold = max(threshold, false_negative_criterion(weights))
@@ -131,4 +128,4 @@ def train_rlvi(train_loader, model, optimizer,
         writer.add_scalar("Train/Accuracy", train_acc, epoch)
         writer.add_scalar("Inference/MeanPi", weights.mean().item(), epoch)
 
-    return train_acc, threshold, avg_loss
+    return train_acc, threshold, avg_loss, pi_bar_next
