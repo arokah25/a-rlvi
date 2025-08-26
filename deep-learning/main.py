@@ -621,10 +621,10 @@ def run():
     
 
     if args.method in ['rlvi', 'arlvi_zscore']:
-        # prior belief most samples are clean;
-        pi_bar = 0.9
-        sample_weights = torch.full((len(train_dataset),), pi_bar, device=DEVICE)
+        # RLVI Algorithm 2: initialize π_i = 1 for the first epoch
+        sample_weights = torch.ones(len(train_dataset), device=DEVICE)
         residuals = torch.zeros_like(sample_weights, device=DEVICE)
+
         overfit = False
         threshold = 0
         val_acc_old, val_acc_old_old = 0, 0
@@ -665,8 +665,9 @@ def run():
             train_acc, threshold, train_loss, pi_bar = methods.train_rlvi(
                 train_loader, model, optimizer,
                 residuals, sample_weights, overfit, threshold,
-                writer=None, epoch=epoch, pi_bar=pi_bar
+                writer=None, epoch=epoch
             )
+
 
 
             epoch_time = time.time() - start_time
