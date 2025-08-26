@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 from math import sqrt
 torch.backends.cudnn.benchmark = True
 from torchvision.transforms import InterpolationMode
+import copy  # used to clone the train dataset for a deterministic eval pass
+
 
 
 
@@ -49,19 +51,13 @@ parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi_zscore, co
 ###---for A-RLVI ---###
 parser.add_argument('--tau', type=float, default=1.0,
                     help='temperature for detached target q_i(τ)')
-parser.add_argument('--beta', type=float, default=1.0,
-                    help='Weight for the KL divergence regularization term (zscore A-RLVI)')
-
 parser.add_argument('--download', dest='download', action='store_true',
                     help='Download dataset if not present')
 parser.add_argument('--no-download', dest='download', action='store_false',
                     help='Do not download dataset')
 parser.set_defaults(download=True)
 
-parser.add_argument('--warmup_epochs', type=int, default=2,
-                    help='Number of warm-up epochs where π̄ is fixed (default: 2)')
 parser.add_argument('--ema_alpha', type=float, help='momentum in ema average', default=0.95)
-parser.add_argument('--beta_entropy_reg', type=float, help='coefficient for entropy regularization strength', default=0.05)
 parser.add_argument('--lr_init', type=float, default=1e-3,
                     help='Initial learning rate for model (used by SGD)')
 parser.add_argument('--lr_inference', type=float, default=5e-5,
@@ -500,6 +496,25 @@ def run():
         drop_last=False,
         pin_memory=True
     )
+    # -----------------------------------------------
+    # === RLVI E-step eval loader (deterministic, same indices as train) ===
+    if args.method == "rlvi" and args.dataset == "food101":
+        train_eval_dataset = copy.copy(train_dataset)
+        train_eval_dataset.transform = transform_test  # deterministic pipeline (Resize+CenterCrop, no erasing/jitter)
+        # ensure the same subset of Food-101 as the train split
+        if hasattr(train_dataset, "indices"):
+            train_eval_dataset.indices = train_dataset.indices
+        train_eval_loader = torch.utils.data.DataLoader(
+            dataset=train_eval_dataset,
+            batch_size=args.batch_size,
+            num_workers=workers,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=4
+        )
+
 
 
 
@@ -526,6 +541,8 @@ def run():
         
 
         model = CombinedModel(model_features, model_classifier)
+
+        
 
     else:
         model = Model(input_channel=input_channel, num_classes=num_classes)
@@ -663,22 +680,20 @@ def run():
         elif args.method == "rlvi":
             start_time = time.time()
             train_acc, threshold, train_loss, pi_bar = methods.train_rlvi(
-                train_loader, model, optimizer,
+                train_loader, train_eval_loader,  # deterministic eval loader for E-step
+                model, optimizer,
                 residuals, sample_weights, overfit, threshold,
                 writer=None, epoch=epoch
             )
 
-
-
+            
             epoch_time = time.time() - start_time
-            val_acc = utils.evaluate(val_loader, model)    # computed every epoch
-            test_acc = utils.evaluate(test_loader, model)  # computed every epoch
-
-            # Print once with everything
+            val_acc  = utils.evaluate(val_loader,  model)
+            test_acc = utils.evaluate(test_loader, model)
             print(f"[rlvi] epoch {epoch:03d} | time={epoch_time:.1f}s | "
-                  f"train={train_acc*100:.2f}% | val={val_acc:.2f}% | test={test_acc:.2f}% |"
-                  f" π̄={pi_bar:.4f}"
-                  )
+                f"train={train_acc*100:.2f}% | val={val_acc:.2f}% | test={test_acc:.2f}% | "
+                f"π̄={pi_bar:.6f}")
+
 
 
 
