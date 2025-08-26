@@ -557,7 +557,6 @@ def run():
     if args.method in ['arlvi_zscore']:
         param_groups.append({'params': inf_params, 'weight_decay': args.wd_inference})
 
-    optim_all = torch.optim.AdamW(param_groups, lr=1e-3)
 
     # Use a smaller LR for the pretrained backbone, larger LR for the new head.
     lr_bb = args.lr_init * 0.3
@@ -622,11 +621,14 @@ def run():
     
 
     if args.method in ['rlvi', 'arlvi_zscore']:
-        sample_weights = torch.ones(len(train_dataset)).to(DEVICE)
-        residuals = torch.zeros_like(sample_weights).to(DEVICE)
+        # prior belief most samples are clean;
+        pi_bar = 0.9
+        sample_weights = torch.full((len(train_dataset),), pi_bar, device=DEVICE)
+        residuals = torch.zeros_like(sample_weights, device=DEVICE)
         overfit = False
         threshold = 0
         val_acc_old, val_acc_old_old = 0, 0
+
 
 
     # Training
@@ -660,22 +662,23 @@ def run():
 
         elif args.method == "rlvi":
             start_time = time.time()
-            train_acc, threshold, train_loss = methods.train_rlvi(
+            train_acc, threshold, train_loss, pi_bar = methods.train_rlvi(
                 train_loader, model, optimizer,
-                residuals, sample_weights, overfit, threshold, 
-                writer=None, epoch=epoch
+                residuals, sample_weights, overfit, threshold,
+                writer=None, epoch=epoch, pi_bar=pi_bar
             )
+
 
             epoch_time = time.time() - start_time
             val_acc = utils.evaluate(val_loader, model)    # computed every epoch
             test_acc = utils.evaluate(test_loader, model)  # computed every epoch
 
             # Print once with everything
-            print(
-                f"[rlvi] ep {epoch:03d} | time={epoch_time:.1f}s | "
-                f"train={train_acc*100:.2f}% | val={val_acc:.2f}% | test={test_acc:.2f}% | "
-                f"π̄={sample_weights.mean().item():.3f}"
-            )
+            print(f"[rlvi] epoch {epoch:03d} | time={epoch_time:.1f}s | "
+                  f"train={train_acc*100:.2f}% | val={val_acc:.2f}% | test={test_acc:.2f}% |"
+                  f" π̄={pi_bar:.4f}"
+                  )
+
 
 
 
@@ -932,7 +935,7 @@ def run():
         plt.close()
 
 
-        # LR traces across training (per batch)
+    # LR traces across training (per batch)
     if len(hist_lr_bb) and len(hist_lr_cls):
         plt.figure()
         plt.plot(hist_lr_bb, label='Backbone LR')
