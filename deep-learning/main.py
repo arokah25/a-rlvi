@@ -606,7 +606,7 @@ def run():
 
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
-    if args.method in ['arlvi_zscore', 'rlvi']:
+    if args.method in ['arlvi_zscore']:
 
         steps_per_epoch = len(train_loader)
         # Per-group max LRs map to param group order above:
@@ -620,6 +620,19 @@ def run():
             steps_per_epoch=steps_per_epoch,
             epochs=args.n_epoch
             )
+        
+    elif args.method == 'rlvi':
+        steps_per_epoch = len(train_loader)
+        scheduler_all = OneCycleLR(
+            optim_all,
+            # groups: [bb_decay, bb_no_decay, hd_decay, hd_no_decay]
+            max_lr=[1e-3, 1e-3, 4e-3, 4e-3],
+            div_factor=10.0,        # start at max_lr/10
+            final_div_factor=5e3,   # end near max_lr/5000
+            pct_start=0.05,
+            steps_per_epoch=steps_per_epoch,
+            epochs=args.n_epoch
+        )
     else:
         scheduler_all = None
 
