@@ -51,6 +51,8 @@ parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi_zscore, co
 ###---for A-RLVI ---###
 parser.add_argument('--tau', type=float, default=1.0,
                     help='temperature for detached target q_i(τ)')
+parser.add_argument('--warmup_epochs', type=int, default=3,
+                    help='warmup epochs used in once-cycle LR schedule for RLVI / ARLVI')
 parser.add_argument('--download', dest='download', action='store_true',
                     help='Download dataset if not present')
 parser.add_argument('--no-download', dest='download', action='store_false',
@@ -458,7 +460,11 @@ def run():
     train_acc = 0.0
     val_acc = 0.0
     test_acc = 0.0
-        # Data Loaders
+
+    # --- locals used by optional A-RLVI diagnostics; keep defined for RLVI too
+    last_pi_acc_bins = None
+    last_pi_bin_counts = None
+    # Data Loaders
     # Keep this small on Colab until you confirm fast local IO
     workers = args.num_workers
 
@@ -600,7 +606,7 @@ def run():
 
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
-    if args.method in ['arlvi_zscore']:
+    if args.method in ['arlvi_zscore', 'rlvi']:
 
         steps_per_epoch = len(train_loader)
         # Per-group max LRs map to param group order above:
@@ -683,7 +689,7 @@ def run():
                 train_loader, train_eval_loader,  # deterministic eval loader for E-step
                 model, optimizer,
                 residuals, sample_weights, overfit, threshold,
-                writer=None, epoch=epoch
+                writer=None, epoch=epoch, scheduler=scheduler_all
             )
 
             
