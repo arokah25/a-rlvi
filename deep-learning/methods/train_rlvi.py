@@ -21,22 +21,31 @@ def e_step_update_pi_no_self_consistency(
       • No inner fixed point on μ. (The self-consistent μ update collapses to 0.)
     Returns (pi_bar_after, alpha_used).
     """
+     # ---- hyperparams for a stable, paper-aligned update ----
+    alpha0 = 0.90      # prior clean prevalence (tune 0.85–0.95)
+    rho    = 0.25      # how much we trust the prior each epoch
+    clip_m = 10.0      # max CE used in E-step (cut heavy tails)
+    gamma  = 1.0       # optionally <1.0 to soften: s = c - gamma*ℓ
+
     if alpha_prev is None:
-        # default to mean π from previous epoch
         alpha_prev = float(weights.mean().item())
 
-    # keep α in (eps, 1-eps) to avoid ±∞ logits
-    alpha_prev = min(max(alpha_prev, eps), 1.0 - eps)
-    c = math.log(alpha_prev / (1.0 - alpha_prev))  # scalar offset
+    # anchor α to a prior to prevent free-fall
+    alpha_used = (1.0 - rho) * alpha_prev + rho * alpha0
+    alpha_used = min(max(alpha_used, eps), 1.0 - eps)
+
+    # scalar offset c = logit(α_used)
+    c = math.log(alpha_used / (1.0 - alpha_used))
 
     # numerical safety on ℓ (doesn't change ordering)
-    ell = residuals.clamp(min=0.0, max=30.0)
+    ell = residuals.clamp(min=0.0, max=clip_m)
 
-    # vectorized π update
-    new_pi = torch.sigmoid(c - ell).clamp_(eps, 1.0 - eps)
+    # vectorized π update: π_i = σ(c - γ ℓ_i)
+    new_pi = torch.sigmoid(c - gamma * ell).clamp_(eps, 1.0 - eps)
     weights.copy_(new_pi)  # write back in-place
 
-    return float(new_pi.mean().item()), float(alpha_prev)
+    return float(new_pi.mean().item()), float(alpha_used)
+
 
 
 @torch.no_grad()
@@ -68,6 +77,7 @@ def train_rlvi(train_loader,
                overfit: bool,
                threshold: float,
                writer=None,
+               scheduler=None,
                epoch: int | None = None):
     """
     One epoch of RLVI:
@@ -109,6 +119,8 @@ def train_rlvi(train_loader,
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         total_loss += loss.item() * images.size(0)
         total_seen += images.size(0)
