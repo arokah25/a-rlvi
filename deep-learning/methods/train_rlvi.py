@@ -1,6 +1,6 @@
-import math
 import torch
 from torch.nn import functional as F
+from torch.autograd import Variable
 from tqdm.auto import tqdm
 
 __all__ = ["train_rlvi"]
@@ -9,67 +9,58 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @torch.no_grad()
-def e_step_update_pi_no_self_consistency(
-    residuals: torch.Tensor,           # ℓ_i = per-sample CE from a deterministic pass
-    weights: torch.Tensor,             # π from previous epoch (updated in-place)
-    alpha_prev: float | None = None,   # prevalence of clean samples from prev epoch (μ_{t-1})
-    eps: float = 1e-6
-) -> tuple[float, float]:
+def update_sample_weights(residuals: torch.Tensor,
+                          weights: torch.Tensor,
+                          tol: float = 1e-3,
+                          maxiter: int = 40):
     """
-    Paper-aligned E-step: keep scalar offset c fixed, update π_i = σ(c - ℓ_i).
-      • Choose c from α_prev via: c = log(α_prev / (1-α_prev)).
-      • No inner fixed point on μ. (The self-consistent μ update collapses to 0.)
-    Returns (pi_bar_after, alpha_used).
+    Colleague-style E-step:
+      1) shift CE to be non-negative: ℓ <- ℓ - min(ℓ)
+      2) exp(-ℓ)
+      3) iterate avg_weight (mu) via logistic mapping with ratio = mu/(1-mu)
+      4) stop when ||π_new-π|| < tol
+      5) rescale to [0,1] by dividing by max (note: this inflates the mean)
     """
-     # ---- hyperparams for a stable, paper-aligned update ----
-    alpha0 = 0.90      # prior clean prevalence (tune 0.85–0.95)
-    rho    = 0.25      # how much we trust the prior each epoch
-    clip_m = 10.0      # max CE used in E-step (cut heavy tails)
-    gamma  = 1.0       # optionally <1.0 to soften: s = c - gamma*ℓ
+    # 1) shift CE so min is 0 (keeps ordering; reduces blow-up)
+    residuals.sub_(residuals.min())
 
-    if alpha_prev is None:
-        alpha_prev = float(weights.mean().item())
+    # 2) exponentiate the "goodness"
+    exp_res = torch.exp(-residuals)
 
-    # anchor α to a prior to prevent free-fall
-    alpha_used = (1.0 - rho) * alpha_prev + rho * alpha0
-    alpha_used = min(max(alpha_used, eps), 1.0 - eps)
+    # 3) iterate avg_weight
+    avg_weight = 0.95  # their starting prevalence
+    for _ in range(maxiter):
+        ratio = avg_weight / (1.0 - avg_weight)
+        new_weights = (ratio * exp_res) / (1.0 + ratio * exp_res)
 
-    # scalar offset c = logit(α_used)
-    c = math.log(alpha_used / (1.0 - alpha_used))
+        error = torch.norm(new_weights - weights)
+        weights.copy_(new_weights)
+        avg_weight = float(weights.mean().item())
+        if error < tol:
+            break
 
-    # numerical safety on ℓ (doesn't change ordering)
-    ell = residuals.clamp(min=0.0, max=clip_m)
-
-    # vectorized π update: π_i = σ(c - γ ℓ_i)
-    new_pi = torch.sigmoid(c - gamma * ell).clamp_(eps, 1.0 - eps)
-    weights.copy_(new_pi)  # write back in-place
-
-    return float(new_pi.mean().item()), float(alpha_used)
+    # 5) rescale to [0,1] by max (faithful to their code)
+    wmax = float(weights.max().item())
+    if wmax > 0:
+        weights.div_(wmax)
 
 
-
-@torch.no_grad()
-def _eval_residuals_fullpass(eval_loader, model, residuals):
+def false_negative_criterion(weights: torch.Tensor, alpha: float = 0.05) -> torch.Tensor:
     """
-    Recompute ℓ_i for *all* training samples with θ frozen, using the
-    deterministic EVAL transform loader (no aug/erasing; BN in eval mode).
+    Find threshold from fixed probability (alpha) of type II error
+    (identical to your colleague’s implementation).
     """
-    was_training = model.training
-    model.eval()
-    for images, labels, indexes in tqdm(eval_loader, desc="RLVI E-step: eval ℓ", leave=False):
-        images  = images.to(DEVICE, non_blocking=True)
-        labels  = labels.to(DEVICE, non_blocking=True)
-        indexes = indexes.to(DEVICE, non_blocking=True)
-
-        logits = model(images)
-        ce_vec = F.cross_entropy(logits, labels, reduction="none")
-        residuals[indexes] = ce_vec
-    if was_training:
-        model.train()
+    total_positive = torch.sum(1.0 - weights)
+    beta = total_positive * alpha
+    sorted_weights, _ = torch.sort(weights, dim=0, descending=True)
+    false_negative = torch.cumsum(1.0 - sorted_weights, dim=0)
+    last_index = torch.sum(false_negative <= beta) - 1
+    threshold = sorted_weights[max(int(last_index.item()), 0)]
+    return threshold
 
 
 def train_rlvi(train_loader,
-               eval_loader,                     # deterministic eval transform (you already pass this)
+               eval_loader,                     # NOTE: accepted but unused (keeps main.py intact)
                model: torch.nn.Module,
                optimizer: torch.optim.Optimizer,
                residuals: torch.Tensor,         # [N] persistent CE buffer
@@ -80,41 +71,48 @@ def train_rlvi(train_loader,
                scheduler=None,
                epoch: int | None = None):
     """
-    One epoch of RLVI:
-      M-step: θ ← argmin Σ π_i ℓ_i(θ)   (use current π; normalize by Σπ for scale)
-      E-step: π_i ← σ(c - ℓ_i) with c = log(α_prev / (1-α_prev)),
-              where α_prev is the previous epoch's mean π (no inner μ fixed point).
-    """
-    N = residuals.numel()
-    assert weights.shape == residuals.shape == (N,), "π and ℓ buffers must be 1-D and same length"
+    One epoch of the colleague-style RLVI (as pasted):
+      • M-step: update θ with per-sample CE weighted by current π[indexes]
+                while ALSO writing current batch CE into `residuals[indexes]`.
+      • E-step: call `update_sample_weights(residuals, weights)` (in-place).
+      • Optional truncation via type II criterion when `overfit` is True.
 
-    # ----------------------- M-STEP -----------------------
+    Returns:
+      train_acc, threshold, avg_loss, pi_bar
+    """
     model.train()
+
     train_total = 0
     train_correct = 0
     total_loss = 0.0
     total_seen = 0
 
+    # --- M-step (SGD with current π) + write residuals like colleague’s code ---
     for images, labels, indexes in tqdm(train_loader, desc=f"RLVI epoch {epoch}", leave=False):
-        if torch.any(indexes < 0) or torch.any(indexes >= N):
-            raise RuntimeError(f"Out-of-range indices (max={int(indexes.max())}, N={N}).")
-
-        images  = images.to(DEVICE, non_blocking=True)
-        labels  = labels.to(DEVICE, non_blocking=True)
+        images  = Variable(images).to(DEVICE, non_blocking=True)
+        labels  = Variable(labels).to(DEVICE, non_blocking=True)
         indexes = indexes.to(DEVICE, non_blocking=True)
 
         logits = model(images)
 
+        # Top-1 accuracy in their style (per-batch, averaged)
         with torch.no_grad():
             preds = logits.argmax(dim=1)
-            train_correct += (preds == labels).sum().item()
-            train_total   += labels.size(0)
+            # They used `accuracy` that returns percentage as a scalar tensor per batch.
+            # We mimic that behavior by averaging per-batch (so epoch accuracy is mean of batch accuracies).
+            correct = (preds == labels).float().mean()  # in [0,1]
+            train_total += 1
+            train_correct += float(correct.item())
 
+        # Per-sample CE
         ce_vec = F.cross_entropy(logits, labels, reduction="none")
 
+        # Save the raw losses for the E-step (colleague does it inside M-step)
+        residuals[indexes] = ce_vec.detach()
+
+        # Weight the loss with current π
         w = weights[indexes]
-        denom = w.sum().clamp_min(1.0)            # keep grad scale stable
-        loss = (ce_vec * w).sum() / denom
+        loss = (ce_vec * w).mean()  # colleague uses mean, not normalization by sum(w)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -122,47 +120,25 @@ def train_rlvi(train_loader,
         if scheduler is not None:
             scheduler.step()
 
-        total_loss += loss.item() * images.size(0)
-        total_seen += images.size(0)
+        total_loss += float(loss.item()) * images.size(0)
+        total_seen += int(images.size(0))
 
-    # ---------------- recompute ℓ_i on the whole train set (frozen θ) --------
-    _eval_residuals_fullpass(eval_loader, model, residuals)
+    # --- E-step (colleague style) ---
+    update_sample_weights(residuals, weights)
 
-    # quick sanity on epoch 1
-    if epoch == 1:
-        ce_min = float(residuals.min().item())
-        ce_med = float(residuals.median().item())
-        ce_max = float(residuals.max().item())
-        mu0    = float(weights.mean().item())
-        print(f"[debug:e{epoch}] CE(min/med/max) = {ce_min:.3f}/{ce_med:.3f}/{ce_max:.3f}; <π>_before = {mu0:.6f}")
-
-    # ----------------------- E-STEP (paper-aligned) --------------------------
-    alpha_prev = float(weights.mean().item())  # μ_{t-1}
-    pi_bar, alpha_used = e_step_update_pi_no_self_consistency(
-        residuals=residuals,
-        weights=weights,
-        alpha_prev=alpha_prev,
-        eps=1e-6
-    )
-
-    if epoch == 1:
-        print(f"[debug:e{epoch}] used α_prev={alpha_used:.6f}; <π>_after = {float(weights.mean().item()):.6f}")
-
-    # Optional truncation if you *really* want it (off by default)
+    # --- Optional truncation (unchanged) ---
     if overfit:
-        sorted_w, _ = torch.sort(weights, descending=True)
-        fn_cumsum = torch.cumsum(1.0 - sorted_w, dim=0)
-        beta = (1.0 - weights).sum() * 0.05
-        k = (fn_cumsum <= beta).sum() - 1
-        tau = sorted_w[max(k, 0)]
-        weights[weights < tau] = 0.0
+        threshold = max(float(threshold), float(false_negative_criterion(weights)))
+        weights[weights < threshold] = 0.0
 
-    train_acc = float(train_correct) / float(train_total)
+    train_acc = float(train_correct) / max(1, train_total)  # mean of batch accuracies
     avg_loss  = total_loss / max(1, total_seen)
+    pi_bar    = float(weights.mean().item())
 
+    # logging hooks, kept compatible with your main.py
     if writer is not None and epoch is not None:
-        writer.add_scalar("Loss/CE_weighted", avg_loss, epoch)
-        writer.add_scalar("Train/Accuracy", train_acc, epoch)
+        writer.add_scalar("Loss/CE_weighted_mean", avg_loss, epoch)
+        writer.add_scalar("Train/Accuracy_epochmean", train_acc, epoch)
         writer.add_scalar("Inference/pi_mean", pi_bar, epoch)
 
     return train_acc, threshold, avg_loss, pi_bar
