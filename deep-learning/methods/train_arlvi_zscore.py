@@ -148,12 +148,8 @@ def train_arlvi_zscore(
     pi_bin_totals  = [0, 0, 0]   # [<lo, lo–hi, >hi]
     pi_bin_correct = [0, 0, 0]
 
-
     # Slow global prior π̄ (scalar) maintained as an EMA of mean(π) per batch
     pi_bar_running: torch.Tensor | None = None  # will hold a 0-dim tensor on device
-
-    # If doing once-per-epoch φ update, zero its grads up front
-    # (Batch updates only with unified optimizer; no separate once-per-epoch φ step.)
 
     # ------------------------------
     # Mini-batch training loop
@@ -166,6 +162,7 @@ def train_arlvi_zscore(
         B      = images.size(0)
 
         # ----------------- Forward pass (AMP-safe) -----------------
+        # keep backbone+head under AMP for speed
         with torch.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
             # 1) Backbone → features
             z_i = model_features(images)            # (B, D, 1, 1) for ResNet-like
@@ -174,54 +171,56 @@ def train_arlvi_zscore(
             # 2) Classifier → logits over classes
             logits = model_classifier(z_i)          # (B, C) logits for C classes
 
-            # 3) Inference net → corruption belief π_i
-            pi_i = inference_net(z_i.detach())      # (B,)
-
-            # Defining inference target q_i(τ) -- 4 and 5 below:
             # 4) Per-sample supervised loss (e.g., CE) — NO reduction
             ce_vec = F.cross_entropy(logits, labels, reduction="none")  # (B,)
 
-            # 5) DETACHED per-sample target via batch z-scored CE:
-            #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
-            r_i = _zscore_detached(ce_vec)          # (B,) detached
-            #    q_i(τ) := σ( - r_i / τ )  → lower-than-avg CE (easy) → q ≈ 1 (clean)
-            q_i = torch.sigmoid(-r_i / tau)         # (B,) detached (r_i is detached)
+        # 5) DETACHED per-sample target via batch z-scored CE (in FP32):
+        #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
+        r_i = _zscore_detached(ce_vec.float())      # (B,) detached FP32
 
-            # 6) Slow global prior π̄  (scalar) via EMA of mean(π) per batch
-            batch_mean_pi = pi_i.mean().detach()    # scalar (0-dim tensor), detached
-            # --- update EMA under no_grad so it's a pure statistic ---
-            with torch.no_grad():
-                if pi_bar_running is None:
-                    pi_bar_running = batch_mean_pi  # initialize EMA on first batch
-                else:
-                    pi_bar_running = ema_alpha * pi_bar_running + (1. - ema_alpha) * batch_mean_pi
-            pi_bar = pi_bar_running.detach()        # scalar, detached
+        #    Teacher q_i(τ) WITHOUT baking in the prior (β):
+        #    lower-than-avg CE (easy) → q ≈ 1 (clean)
+        q_i = torch.sigmoid(-r_i / tau)             # (B,) detached path overall
 
-            # --- normalize θ-weights so their batch mean is exactly 1 ---
-            # keeps the overall gradient scale for θ steady across batches.
-            # Use the detached π so no gradients flow into φ from the CE path.
-            pi_w = pi_i.detach() / (batch_mean_pi + 1e-8)   # shape (B,), mean(pi_w) == 1
+        # 3) Inference net → corruption belief π_i  (run in full precision due to LayerNorm)
+        with torch.autocast(device_type="cuda", enabled=False):
+            pi_i = inference_net(z_i.detach().float())  # (B,)
 
-            # 7) Loss definitions (one for inf_net and one for the backbone / classifier) 
-            #   θ-loss (backbone + classifier):
-            #   L_theta = mean( stop_grad(π_i) * CE_i )
-            #   - Using stop_grad(π_i) BREAKS the collapse loop:
-            #     φ cannot lower L_theta by shrinking π globally.
-            L_theta = (pi_w * ce_vec).mean()   # scalar
+        # 6) Slow global prior π̄  (scalar) via EMA of mean(π) per batch
+        batch_mean_pi = pi_i.mean().detach()    # scalar (0-dim tensor), detached
+        # --- update EMA under no_grad so it's a pure statistic ---
+        with torch.no_grad():
+            if pi_bar_running is None:
+                pi_bar_running = batch_mean_pi  # initialize EMA on first batch
+            else:
+                pi_bar_running = ema_alpha * pi_bar_running + (1. - ema_alpha) * batch_mean_pi
 
-            #   φ-loss (inference net):
-            #   Pull π_i toward its detached per-sample target q_i(τ)
-            #   AND anchor it to the slow global prior π̄.
-            #   Both inputs to KL are element-wise in (B,).
-            kl_to_q   = kl_bern(pi_i, q_i)                           # (B,)
-            kl_to_bar = kl_bern(pi_i, torch.full_like(pi_i, float(pi_bar))) # (B,)
-            L_phi     = (kl_to_q + kl_to_bar).mean()                 # scalar
+        # --- normalize θ-weights so their batch mean is exactly 1 ---
+        # keeps the overall gradient scale for θ steady across batches.
+        # Use the detached π so no gradients flow into φ from the CE path.
+        pi_w = pi_i.detach() / (batch_mean_pi + 1e-8)   # shape (B,), mean(pi_w) == 1
 
-            #   For logging epoch-averages, we sum CE and KL *as used*:
-            #   - CE tracked with DETACHED π weights (matches L_theta use)
-            #   - KL tracked as sum of both KL terms
-            ce_term = (pi_w * ce_vec).sum()                          # scalar
-            kl_term = (kl_to_q + kl_to_bar).sum()                    # scalar
+        # 7) Loss definitions (one for inf_net and one for the backbone / classifier) 
+        #   θ-loss (backbone + classifier):
+        #   L_theta = mean( stop_grad(π_i) * CE_i )
+        #   - Using stop_grad(π_i) BREAKS the collapse loop:
+        #     φ cannot lower L_theta by shrinking π globally.
+        L_theta = (pi_w * ce_vec).mean()   # scalar
+
+        #   φ-loss (inference net):
+        #   Pull π_i toward its detached per-sample target q_i(τ),
+        #   AND add a separate KL-to-prior regularizer KL(π_i || π̄).
+        kl_to_q     = kl_bern(pi_i, q_i)                          # (B,)
+        # broadcast scalar π̄ to shape (B,) for element-wise KL
+        pi_bar      = torch.clamp(pi_bar_running.detach().float(), 1e-4, 1 - 1e-4)
+        kl_to_prior = kl_bern(pi_i, pi_bar)                       # (B,)
+        L_phi       = (kl_to_q + kl_to_prior).mean()              # scalar
+
+        #   For logging epoch-averages, we sum CE and KL *as used*:
+        #   - CE tracked with DETACHED π weights (matches L_theta use)
+        #   - KL tracked as the teacher + prior terms
+        ce_term = (pi_w * ce_vec).sum()                           # scalar
+        kl_term = (kl_to_q + kl_to_prior).sum()                   # scalar
 
         # ----------------- Backward / Optimizer steps -----------------
         # Unified optimizer path: zero grads once, backprop once on (L_theta + L_phi)
@@ -259,8 +258,8 @@ def train_arlvi_zscore(
                 f"  ↳ bt {b_idx:04d}: "
                 f"Lθ={L_theta.item():.3f} Lφ={L_phi.item():.3f} | "
                 f"CĒ={ce_vec.mean().item():.3f}  "
-                f"KLq̄={kl_to_q.mean().item():.3f}  KL_π̄={kl_to_bar.mean().item():.3f} | "
-                f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar):.3f} | "
+                f"KLq̄={kl_to_q.mean().item():.3f} KLprior̄={kl_to_prior.mean().item():.3f} | "
+                f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar_running):.3f} | "
                 f"π_min={pi_i.min().item():.3f} π_max={pi_i.max().item():.3f} | "
                 f"spearman(pi_vs_negCE)={_spearman_corr_torch(pi_i, -ce_vec):.3f}  "
                 f"pct_pi_below_0.25={(pi_i < 0.25).float().mean().item()*100:.1f}%  "
@@ -373,7 +372,6 @@ def train_arlvi_zscore(
         "gt_0.75":  int(pi_bin_totals[2]),
     }
 
-
     diag = {
         "grad_backbone":   grad_bb,
         "grad_classifier": grad_cls,
@@ -394,7 +392,6 @@ def train_arlvi_zscore(
         "pi_bin_counts":       pi_bin_counts,
         "pi_bins":             (bin_lo, bin_hi),
     })
-
 
     if return_diag:
         return ce_epoch, kl_epoch, acc_epoch, diag
