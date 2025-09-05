@@ -178,9 +178,15 @@ def train_arlvi_zscore(
         #    r_i := zscore(CE) detached so gradients do NOT flow into θ or φ from here
         r_i = _zscore_detached(ce_vec.float())      # (B,) detached FP32
 
-        #    Teacher q_i(τ) WITHOUT baking in the prior (β):
-        #    lower-than-avg CE (easy) → q ≈ 1 (clean)
-        q_i = torch.sigmoid(-r_i / tau)             # (B,) detached path overall
+        #    Calibrated teacher with β = logit(π̄_prior):
+        #    use the EMA prior from previous batches; initialize at 0.75 on first use
+        if pi_bar_running is None:
+            pi_bar = torch.tensor(0.75, device=device, dtype=torch.float32)
+        else:
+            pi_bar = pi_bar_running.detach().float()
+        beta = torch.logit(torch.clamp(pi_bar, 1e-4, 1 - 1e-4))  # scalar
+        #    q_i(τ) := σ( - r_i / τ + β )  → lower-than-avg CE (easy) → q ≈ 1 (clean)
+        q_i = torch.sigmoid(-r_i / tau + beta)     # (B,) detached path overall
 
         # 3) Inference net → corruption belief π_i  (run in full precision due to LayerNorm)
         with torch.autocast(device_type="cuda", enabled=False):
@@ -208,19 +214,16 @@ def train_arlvi_zscore(
         L_theta = (pi_w * ce_vec).mean()   # scalar
 
         #   φ-loss (inference net):
-        #   Pull π_i toward its detached per-sample target q_i(τ),
-        #   AND add a separate KL-to-prior regularizer KL(π_i || π̄).
-        kl_to_q     = kl_bern(pi_i, q_i)                          # (B,)
-        # broadcast scalar π̄ to shape (B,) for element-wise KL
-        pi_bar      = torch.clamp(pi_bar_running.detach().float(), 1e-4, 1 - 1e-4)
-        kl_to_prior = kl_bern(pi_i, pi_bar)                       # (B,)
-        L_phi       = (kl_to_q + kl_to_prior).mean()              # scalar
+        #   Pull π_i toward its detached per-sample target q_i(τ).
+        #   (β is baked into q_i, so we drop the extra KL-to-prior.)
+        kl_to_q   = kl_bern(pi_i, q_i)                           # (B,)
+        L_phi     = kl_to_q.mean()                                # scalar
 
         #   For logging epoch-averages, we sum CE and KL *as used*:
         #   - CE tracked with DETACHED π weights (matches L_theta use)
-        #   - KL tracked as the teacher + prior terms
+        #   - KL tracked as the teacher term only
         ce_term = (pi_w * ce_vec).sum()                           # scalar
-        kl_term = (kl_to_q + kl_to_prior).sum()                   # scalar
+        kl_term = kl_to_q.sum()                                   # scalar
 
         # ----------------- Backward / Optimizer steps -----------------
         # Unified optimizer path: zero grads once, backprop once on (L_theta + L_phi)
@@ -258,7 +261,7 @@ def train_arlvi_zscore(
                 f"  ↳ bt {b_idx:04d}: "
                 f"Lθ={L_theta.item():.3f} Lφ={L_phi.item():.3f} | "
                 f"CĒ={ce_vec.mean().item():.3f}  "
-                f"KLq̄={kl_to_q.mean().item():.3f} KLprior̄={kl_to_prior.mean().item():.3f} | "
+                f"KLq̄={kl_to_q.mean().item():.3f} | "
                 f"π̄_batch={float(batch_mean_pi):.3f}  π̄_ema={float(pi_bar_running):.3f} | "
                 f"π_min={pi_i.min().item():.3f} π_max={pi_i.max().item():.3f} | "
                 f"spearman(pi_vs_negCE)={_spearman_corr_torch(pi_i, -ce_vec):.3f}  "
