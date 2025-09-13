@@ -31,6 +31,11 @@ torch.backends.cudnn.benchmark = True
 from torchvision.transforms import InterpolationMode
 import copy  # used to clone the train dataset for a deterministic eval pass
 
+# === NEW: tiny helpers for grid/CSV export ===
+from torchvision.utils import make_grid, save_image  # grid image export
+import csv  # CSV export
+# ============================================
+
 
 
 
@@ -46,7 +51,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--result_dir', type=str, help = 'dir to save result txt files', default='results/')
 parser.add_argument('--root_dir', type=str, help = 'dir that stores datasets', default='data/')
 parser.add_argument('--dataset', type=str, help='[mnist, cifar10, cifar100, food101]', default='mnist')
-parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi_zscore, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
+parser.add_argument('--method', type=str, help='[regular, rlvi, arlvi_zscore, arlvi_bayes, coteaching, jocor, cdr, usdnl, bare]', default='rlvi')
 
 ###---for A-RLVI ---###
 parser.add_argument('--tau', type=float, default=1.0,
@@ -79,6 +84,11 @@ parser.add_argument('--wd_head',      type=float, default=5e-4,
                     help='Weight decay for classifier head (decay params only)')
 parser.add_argument('--wd_inference', type=float, default=1e-4,
                     help='Weight decay for inference net')
+
+####RLVI Specific####
+parser.add_argument('--rlvi_freeze_bn', action='store_true',
+                    help='Freeze BN running stats during RLVI training (γ/β still learn)')
+
 
 
 ###---###
@@ -269,7 +279,7 @@ if args.dataset == 'cifar100':
                                         split_per=args.split_percentage,
                                         random_seed=args.seed)
 
-    val_dataset = data_load.Cifar100(root=args.root_dir,
+    val_dataset = data_load.Cifar100 root=args.root_dir,
                                         train=False,
                                         transform=Model.transform_test,
                                         target_transform=data_tools.transform_target,
@@ -279,7 +289,7 @@ if args.dataset == 'cifar100':
                                         split_per=args.split_percentage,
                                         random_seed=args.seed)
 
-    test_dataset = data_load.Cifar100Test(root=args.root_dir, 
+    test_dataset = data_load.Cifar100Test root=args.root_dir, 
                                             transform=Model.transform_test, 
                                             target_transform=data_tools.transform_target)"""
 # For Food101 dataset (for arlvi and rlvi training):
@@ -315,7 +325,22 @@ if args.dataset == "food101":
     # RandomErasing expects a tensor
     transforms.RandomErasing(p=0.25, scale=(0.02, 0.2), ratio=(0.3, 3.3), value='random'),
     normalize,
-])
+    ])
+
+    # === RLVI-specific, lower-variance training transform -- fewer augmentations ===
+    transform_train_rlvi = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(0.8, 1.0), interpolation=InterpolationMode.BILINEAR),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+    # If we're running RLVI, override the training transform to reduce CE variance
+    if args.method == 'rlvi':
+        transform_train = transform_train_rlvi
+    # ------------------------------------------------------
+    
+
 
 
 
@@ -478,7 +503,7 @@ def run():
         pin_memory=True,
         persistent_workers=True,  
         prefetch_factor=4       
-    )
+        )
 
     if val_dataset is not None:
         val_loader = torch.utils.data.DataLoader(
@@ -490,7 +515,7 @@ def run():
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=4
-    )
+        )
     else:
         val_loader = None
 
@@ -522,11 +547,8 @@ def run():
         )
 
 
-
-
-
     # Prepare ARLVI*Food101 models and optimizers
-    if args.dataset == 'food101' and args.method in ['arlvi_zscore', 'rlvi']:
+    if args.dataset == 'food101' and args.method in ['arlvi_zscore', 'rlvi', 'arlvi_bayes']:
         # Load pretrained ResNet50 (resnet18 for faster training during testing)
         #backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
@@ -539,9 +561,12 @@ def run():
         model_features = torch.nn.Sequential(*list(backbone.children())[:-1])
         model_classifier = backbone.fc
 
-        # >>> Freeze BN stats only for A-RLVI. Keep BN trainable for RLVI. <<<
-        if args.method in ['arlvi_zscore']:
+        # >>> Freeze BN stats. <<<
+        if args.method in ['arlvi_zscore', 'arlvi_bayes']:
             model_features.apply(set_bn_eval)
+        elif args.method == 'rlvi' and args.rlvi_freeze_bn:
+            model_features.apply(set_bn_eval)
+
 
         feature_dim = in_dim  # 2048 for ResNet50, 512 for ResNet18
         
@@ -551,7 +576,7 @@ def run():
         
 
     else:
-        model = Model(input_channel=input_channel, num_classes=num_classes)
+        model = model(input_channel=input_channel, num_classes=num_classes)
 
 
     model.to(DEVICE)
@@ -577,7 +602,7 @@ def run():
     {'params': hd_no_decay, 'weight_decay': 0.0},
     ]
     
-    if args.method in ['arlvi_zscore']:
+    if args.method in ['arlvi_zscore', 'arlvi_bayes']:
         param_groups.append({'params': inf_params, 'weight_decay': args.wd_inference})
 
 
@@ -592,7 +617,7 @@ def run():
         {'params': hd_no_decay, 'weight_decay': 0.0,              'lr': lr_hd},
     ]
 
-    if args.method in ['arlvi_zscore']:
+    if args.method in ['arlvi_zscore', 'arlvi_bayes']:
         # inference net (only used by A-RLVI(zscore))
         param_groups.append({'params': inf_params, 'weight_decay': args.wd_inference, 'lr': args.lr_inference})
 
@@ -600,14 +625,13 @@ def run():
 
 
 
-    # pass both to train_arlvi_zscore / train_rlvi as dict
+    # pass both to train_arlvi / train_rlvi as dict
     # ─── unified optimizer ────────────────────────────────
     optimizer = optim_all
 
     # Define the learning rate scheduler
     # ─── unified LR scheduler ────────────────────────────────
-    if args.method in ['arlvi_zscore']:
-
+    if args.method in ['arlvi_zscore', 'arlvi_bayes']:
         steps_per_epoch = len(train_loader)
         # Per-group max LRs map to param group order above:
         # [bb_decay, bb_no_decay, hd_decay, hd_no_decay, inf_params]
@@ -656,7 +680,7 @@ def run():
             scheduler_sec = CosineAnnealingLR(optimizer_sec, T_max=200)
     
 
-    if args.method in ['rlvi', 'arlvi_zscore']:
+    if args.method in ['rlvi', 'arlvi_zscore', 'arlvi_bayes']:
         # RLVI Algorithm 2: initialize π_i = 1 for the first epoch
         sample_weights = torch.ones(len(train_dataset), device=DEVICE)
         residuals = torch.zeros_like(sample_weights, device=DEVICE)
@@ -681,8 +705,11 @@ def run():
     for epoch in range(1, args.n_epoch + 1):
         model.train()
         # Keep BN layers (for A-RLVI) using frozen running stats during training (re-apply each epoch)
-        if 'model_features' in locals() and args.method in ['arlvi_zscore']:
+        if 'model_features' in locals() and args.method in ['arlvi_zscore', 'arlvi_bayes']:
             model_features.apply(set_bn_eval)
+        if 'model_features' in locals() and args.method == 'rlvi' and args.rlvi_freeze_bn:
+            model_features.apply(set_bn_eval)
+
 
         time_ep = time.time()
         # Reset per-epoch eval placeholders so we never reuse stale values
@@ -790,6 +817,63 @@ def run():
                 f">{hi:.2f} = {last_pi_acc_bins['gt_0.75']*100:.2f}% (n={last_pi_bin_counts['gt_0.75']})"
             )
 
+        elif args.method == "arlvi_bayes":
+            start_time = time.time()
+            # --- Train Bayes-odds teacher-only A-RLVI (theoretically optimal target) ---
+            ce_loss, kl_loss, train_acc, diag = methods.train_arlvi_bayes(
+                model_features = model_features,
+                model_classifier = model_classifier,
+                inference_net = inference_net,
+                dataloader = train_loader,
+                optim_all = optim_all,          # unified optimizer
+                device = DEVICE,
+                epoch = epoch,
+                ema_alpha = args.ema_alpha,     # EMA for π̄ in teacher only
+                scheduler = scheduler_all,
+                scaler = scaler,
+                grad_clip = None,
+                return_diag = True
+            )
+
+            # histories + console print (mirrors zscore path so plotting code stays identical)
+            hist_ce.append(float(ce_loss))
+            hist_kl.append(float(kl_loss))
+            hist_grad_bb.append(float(diag.get('grad_backbone', 0.0)))
+            hist_grad_cls.append(float(diag.get('grad_classifier', 0.0)))
+            hist_grad_inf.append(float(diag.get('grad_inference', 0.0)))
+            hist_pi_min.append(float(diag.get('pi_min', 0.0)))
+            hist_pi_max.append(float(diag.get('pi_max', 0.0)))
+            hist_pi_mean.append(float(diag.get('pi_mean', 0.0)))
+            hist_lr_bb.extend(diag.get('lr_trace_backbone', []))
+            hist_lr_cls.extend(diag.get('lr_trace_classifier', []))
+            last_pi_acc_bins = diag.get('pi_acc_bins', None)
+            last_pi_bin_counts = diag.get('pi_bin_counts', None)
+
+            val_acc = None
+            test_acc = None
+            if args.eval_val_every > 0 and epoch % args.eval_val_every == 0:
+                val_acc = utils.evaluate(val_loader, model)
+            if args.eval_test_every > 0 and epoch % args.eval_test_every == 0:
+                test_acc = utils.evaluate(test_loader, model)
+
+            epoch_time = time.time() - start_time
+            v = "—" if val_acc is None else f"{val_acc:.2f}%"
+            t = "—" if test_acc is None else f"{test_acc:.2f}%"
+            print(
+                f"[ep {epoch:03d}] | time={epoch_time:.2f}s | "
+                f"CE={hist_ce[-1]:.3f} KL={hist_kl[-1]:.3f} | "
+                f"∥g∥ bb={hist_grad_bb[-1]:.3f} cls={hist_grad_cls[-1]:.3f} inf={hist_grad_inf[-1]:.3f} | "
+                f"π μ={hist_pi_mean[-1]:.3f} min={hist_pi_min[-1]:.2f} max={hist_pi_max[-1]:.2f} | "
+                f"train={train_acc*100:.2f}% val={v} test={t}"
+            )
+            if last_pi_acc_bins is not None:
+                lo, hi = diag.get('pi_bins', (0.25, 0.75))
+                print(
+                    f" π→acc by bin: "
+                    f"<{lo:.2f} = {last_pi_acc_bins['lt_0.25']*100:.2f}% (n={last_pi_bin_counts['lt_0.25']}), "
+                    f"{lo:.2f}–{hi:.2f} = {last_pi_acc_bins['0.25_0.75']*100:.2f}% (n={last_pi_bin_counts['0.25_0.75']}), "
+                    f">{hi:.2f} = {last_pi_acc_bins['gt_0.75']*100:.2f}% (n={last_pi_bin_counts['gt_0.75']})"
+                )
 
 
 
@@ -946,7 +1030,7 @@ def run():
     plt.savefig(os.path.join(plot_dir, 'grad_norms.png'), dpi=150); plt.close()
 
     # π histogram (final)
-    if args.method == 'arlvi_zscore' and 'model_features' in locals():
+    if args.method in ['arlvi_zscore', 'arlvi_bayes'] and 'model_features' in locals():
         pi_all = collect_all_pi(model_features, inference_net, train_loader, DEVICE).flatten().cpu().numpy()
         plt.figure()
         plt.hist(pi_all, bins=50, range=(0.0, 1.0))
@@ -1023,10 +1107,15 @@ def run():
     except NameError:
         arch = model.__class__.__name__     # fallback (e.g., CombinedModel or ResNet18)
 
-    run_label = f"{args.method}-{arch}-seed{args.seed}"
+    #run_label = f"{args.method}-{arch}-seed{args.seed}"
     # Include tau if present (A-RLVI variants)
-    if hasattr(args, 'tau'):
+    #if hasattr(args, 'tau'):
+    #    run_label += f"-tau{args.tau}"
+
+    run_label = f"{args.method}-{arch}-seed{args.seed}"
+    if args.method == 'arlvi_zscore':
         run_label += f"-tau{args.tau}"
+
 
     # Persist this run's curve
     _np.savez(
@@ -1071,6 +1160,137 @@ def run():
 
 
     print(f"Saved plots to: {plot_dir}")
+
+    # =========================================================================
+    # === NEW: Outlier inference for A-RLVI — export lowest-π images & CSV ===
+    # =========================================================================
+    if args.method in ['arlvi_zscore', 'arlvi_bayes']:
+        model_features.eval()
+        model_classifier.eval()
+        inference_net.eval()
+
+        # choose which split to audit (use test set to avoid train-time augmentations)
+        audit_loader = test_loader
+        audit_dataset = test_dataset
+        audit_name = "test"
+
+        # top-K settings
+        top_k = 32  # number of most suspicious (lowest-π) samples to export
+        outliers_dir = os.path.join(save_dir, "outliers")
+        os.makedirs(outliers_dir, exist_ok=True)
+        grid_path = os.path.join(outliers_dir, f"top_outliers_grid_k{top_k}.png")
+        csv_path  = os.path.join(outliers_dir, f"top_outliers_k{top_k}.csv")
+
+        # class name resolver (best-effort)
+        class_names = None
+        if hasattr(audit_dataset, 'classes'):
+            class_names = list(audit_dataset.classes)
+        elif hasattr(audit_dataset, 'classnames'):
+            class_names = list(audit_dataset.classnames)
+        elif hasattr(audit_dataset, 'class_to_idx'):
+            try:
+                inv = [None] * len(audit_dataset.class_to_idx)
+                for name, idx in audit_dataset.class_to_idx.items():
+                    inv[idx] = name
+                class_names = inv
+            except Exception:
+                class_names = None
+
+        def _name(idx: int) -> str:
+            if class_names is not None and 0 <= idx < len(class_names) and class_names[idx] is not None:
+                return str(class_names[idx])
+            return str(idx)
+
+        # denormalize helper (ImageNet stats)
+        IM_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        IM_STD  = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        def _denorm(x: torch.Tensor) -> torch.Tensor:
+            # x: [N,3,H,W] normalized
+            return (x * IM_STD + IM_MEAN).clamp(0, 1)
+
+        # keep only the worst K in memory (store images + metadata)
+        worst: list[dict] = []  # each item: {'pi','img','pred_idx','pred_conf','label_idx','id'}
+        with torch.no_grad():
+            for batch in audit_loader:
+                # unpack flexible batch signature
+                if isinstance(batch, (list, tuple)):
+                    images, labels, *rest = batch
+                else:
+                    images, labels, rest = batch, None, []
+                images = images.to(DEVICE, non_blocking=True)
+                labels = labels.to(DEVICE, non_blocking=True)
+
+                # optional sample identifiers (index or path) if dataset provides them
+                sample_ids = [None] * images.size(0)
+                if rest:
+                    meta = rest[0]
+                    try:
+                        if isinstance(meta, (list, tuple)) and len(meta) == images.size(0):
+                            sample_ids = [str(m) for m in meta]
+                        elif torch.is_tensor(meta) and meta.numel() == images.size(0):
+                            sample_ids = [int(x) for x in meta.cpu().tolist()]
+                    except Exception:
+                        pass
+
+                # forward
+                z = model_features(images).view(images.size(0), -1)
+                logits = model_classifier(z)
+                probs = torch.softmax(logits, dim=1)
+                conf, pred = probs.max(dim=1)
+
+                # A-RLVI clean probabilities
+                pi = inference_net(z.detach().float())  # (B,)
+
+                # iterate samples to maintain top-K lowest π
+                for i in range(images.size(0)):
+                    entry = {
+                        'pi': float(pi[i].item()),
+                        'img': images[i].detach().cpu(),  # store normalized tensor
+                        'pred_idx': int(pred[i].item()),
+                        'pred_conf': float(conf[i].item()),
+                        'label_idx': int(labels[i].item()),
+                        'id': sample_ids[i],
+                    }
+                    if len(worst) < top_k:
+                        worst.append(entry)
+                        worst.sort(key=lambda d: d['pi'])  # ascending by π
+                    else:
+                        # if current π is lower than the highest π we keep, replace it
+                        if entry['pi'] < worst[-1]['pi']:
+                            worst[-1] = entry
+                            worst.sort(key=lambda d: d['pi'])
+
+        if len(worst) == 0:
+            print("[outliers] No samples collected; skipping export.")
+        else:
+            # sort final list strictly ascending by π
+            worst.sort(key=lambda d: d['pi'])
+
+            # make grid image (denormalized)
+            imgs = torch.stack([d['img'] for d in worst], dim=0)
+            imgs_dn = _denorm(imgs)
+            nrow = int(np.ceil(np.sqrt(len(worst))))
+            grid = make_grid(imgs_dn, nrow=nrow, padding=2)
+            save_image(grid, grid_path)
+            print(f"[outliers] Saved grid of lowest-π {len(worst)} {audit_name} samples → {grid_path}")
+
+            # write CSV with metadata
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['rank', 'pi', 'pred_idx', 'pred_name', 'pred_conf', 'label_idx', 'label_name', 'id'])
+                for r, d in enumerate(worst, start=1):
+                    writer.writerow([
+                        r,
+                        f"{d['pi']:.6f}",
+                        d['pred_idx'],
+                        _name(d['pred_idx']),
+                        f"{d['pred_conf']:.4f}",
+                        d['label_idx'],
+                        _name(d['label_idx']),
+                        d['id'] if d['id'] is not None else ''
+                    ])
+            print(f"[outliers] Saved CSV metadata for lowest-π samples → {csv_path}")
+    # =============================== END NEW BLOCK ============================
 
 
 if __name__ == '__main__':
