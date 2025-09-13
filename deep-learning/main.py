@@ -34,6 +34,8 @@ import copy  # used to clone the train dataset for a deterministic eval pass
 # === NEW: tiny helpers for grid/CSV export ===
 from torchvision.utils import make_grid, save_image  # grid image export
 import csv  # CSV export
+# + annotation drawing
+from PIL import Image, ImageDraw, ImageFont
 # ============================================
 
 
@@ -239,7 +241,7 @@ if args.dataset == 'cifar10':
                                         split_per=args.split_percentage,
                                         random_seed=args.seed)
 
-    val_dataset = data_load.Cifar10(root=args.root_dir,
+    val_dataset = data_load.Cifar10 root=args.root_dir,
                                     train=False,
                                     transform=Model.transform_test,
                                     target_transform=data_tools.transform_target,
@@ -268,7 +270,7 @@ if args.dataset == 'cifar100':
     else:
         Model = ResNet34DO  # with dropout
 
-    train_dataset = data_load.Cifar100(root=args.root_dir,
+    train_dataset = data_load.Cifar100 root=args.root_dir,
                                         download=True,
                                         train=True,
                                         transform=Model.transform_train,
@@ -1175,7 +1177,7 @@ def run():
         audit_name = "test"
 
         # top-K settings
-        top_k = 32  # number of most suspicious (lowest-π) samples to export
+        top_k = 10  # number of most suspicious (lowest-π) samples to export
         outliers_dir = os.path.join(save_dir, "outliers")
         os.makedirs(outliers_dir, exist_ok=True)
         grid_path = os.path.join(outliers_dir, f"top_outliers_grid_k{top_k}.png")
@@ -1266,13 +1268,49 @@ def run():
             # sort final list strictly ascending by π
             worst.sort(key=lambda d: d['pi'])
 
-            # make grid image (denormalized)
-            imgs = torch.stack([d['img'] for d in worst], dim=0)
-            imgs_dn = _denorm(imgs)
-            nrow = int(np.ceil(np.sqrt(len(worst))))
-            grid = make_grid(imgs_dn, nrow=nrow, padding=2)
-            save_image(grid, grid_path)
-            print(f"[outliers] Saved grid of lowest-π {len(worst)} {audit_name} samples → {grid_path}")
+            # === Build an annotated grid with (GT, pred, π) under each image ===
+            TILE_W, TILE_H = 224, 224     # Food-101 test crop
+            TEXT_H = 50                   # footer height for labels
+            COLS = min(5, top_k)
+            ROWS = int(np.ceil(len(worst) / COLS))
+            canvas_w = COLS * TILE_W
+            canvas_h = ROWS * (TILE_H + TEXT_H)
+            canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+            draw = ImageDraw.Draw(canvas)
+            try:
+                # Try to load a reasonably compact bitmap font
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+
+            for idx, d in enumerate(worst):
+                r = idx // COLS
+                c = idx % COLS
+                x0 = c * TILE_W
+                y0 = r * (TILE_H + TEXT_H)
+
+                # denorm tensor -> PIL
+                img = d['img'].unsqueeze(0)           # [1,3,H,W]
+                img_dn = _denorm(img)[0]              # [3,H,W] in [0,1]
+                np_img = (img_dn.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype('uint8')
+                pil = Image.fromarray(np_img)
+
+                # paste image
+                canvas.paste(pil, (x0, y0))
+
+                # footer background
+                draw.rectangle([x0, y0 + TILE_H, x0 + TILE_W, y0 + TILE_H + TEXT_H], fill=(255, 255, 255))
+
+                # text: GT / pred / conf / pi
+                gt = _name(d['label_idx'])
+                pr = _name(d['pred_idx'])
+                txt = f"GT: {gt} | Pred: {pr} ({d['pred_conf']:.2f}) | π={d['pi']:.3f}"
+
+                # small margin
+                draw.text((x0 + 4, y0 + TILE_H + 4), txt, fill=(0, 0, 0), font=font)
+
+            canvas.save(grid_path)
+            print(f"[outliers] Saved annotated grid of lowest-π {len(worst)} {audit_name} samples → {grid_path}")
 
             # write CSV with metadata
             with open(csv_path, 'w', newline='') as f:
