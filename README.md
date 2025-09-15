@@ -1,6 +1,6 @@
 # A-RLVI: Amortized Robust Learning via Variational Inference
 
-A-RLVI is a deep-learning extension of RLVI (Robust Learning via Variational Inference) in which a compact **inference network** predicts a per-sample *cleanliness* belief \( \pi_i \in (0,1) \) from backbone features. These beliefs are used to (i) **robustify** supervised training and (ii) provide an **interpretable outlier score** at inference time.
+A-RLVI is a deep-learning extension of RLVI (Robust Learning via Variational Inference) in which a compact **inference network** predicts a per-sample *cleanliness* belief $\pi_i \in (0,1)$ from backbone features. These beliefs are used to (i) **robustify** supervised training and (ii) provide an **interpretable outlier score** at inference time.
 
 - **Primary dataset:** Food-101 (real label noise)  
 - **Backbone:** ImageNet-pretrained ResNet (default ResNet-50)  
@@ -10,31 +10,31 @@ A-RLVI is a deep-learning extension of RLVI (Robust Learning via Variational Inf
 
 ## Key idea (teacher-only, collapse-avoiding A-RLVI)
 
-Classical RLVI updates per-sample corruption variables via a fixed-point rule driven mainly by loss values; this is not end-to-end differentiable and ignores richer feature signals. A-RLVI replaces that with a *shared*, learnable function \( \pi_i=\sigma(f_\phi(z_i)) \), enabling amortized, differentiable inference tied to the representation.
+Classical RLVI updates per-sample corruption variables via a fixed-point rule driven mainly by loss values; this is not end-to-end differentiable and ignores richer feature signals. A-RLVI replaces that with a *shared*, learnable function $\pi_i=\sigma(f_\phi(z_i))$, enabling amortized, differentiable inference tied to the representation.
 
-To avoid collapse feedback (shrinking \(\pi\) to reduce the weighted CE), this implementation:
-- **Detaches** \(\pi\) from the classifier loss and **mean-normalizes** the weights so \( \nabla_\phi L_\theta = 0 \).
+To avoid collapse feedback (shrinking $\pi$ to reduce the weighted CE), this implementation:
+- **Detaches** $\pi$ from the classifier loss and **mean-normalizes** the weights so $\nabla_\phi L_\theta = 0$.
 - Trains the inference net **only** against a *detached teacher* built from **batch z-scored** CE:  
-  \( r_i = \mathrm{zscore}(\mathrm{CE}_i) \),  
-  \( q_i(\tau) = \sigma(-r_i/\tau + \beta) \), with \( \beta=\mathrm{logit}(\bar\pi) \) from an EMA prior.
-- Minimizes \( \frac{1}{B}\sum_i \mathrm{KL}(\mathrm{Bern}(\pi_i)\,\|\,\mathrm{Bern}(q_i)) \) for the inference net.
+  $r_i=\mathrm{zscore}(\mathrm{CE}_i)$,  
+  $q_i(\tau)=\sigma(-\,r_i/\tau+\beta)$ with $\beta=\operatorname{logit}(\bar{\pi})$ from an EMA prior.
+- Minimizes $\tfrac{1}{B}\sum_i \mathrm{KL}\!\big(\operatorname{Bern}(\pi_i)\,\|\,\operatorname{Bern}(q_i)\big)$ for the inference net.
 
-Result: stable joint training, robust weighting, and informative \( \pi \) distributions for auditing and outlier discovery.
+Result: stable joint training, robust weighting, and informative $\pi$ distributions for auditing and outlier discovery.
 
 ---
 
 ## What this repository provides
 
 - **A-RLVI (z-score teacher variant)** with:
-  - Detached \(\pi\) weighting for the classifier (prevents collapse loops).
+  - Detached $\pi$ weighting for the classifier (prevents collapse loops).
   - Batch z-scored teachers and an EMA prior calibration.
   - OneCycleLR scheduling per parameter group (backbone/head/inference).
 - **RLVI baseline** for comparison (deterministic E-step view on train).
 - **Diagnostics and artifacts** saved per run:
   - CE/KL curves, grad norms, LR traces.
-  - \( \pi \) histogram and \( \pi \rightarrow \) correctness by bins.
+  - $\pi$ histogram and $\pi \rightarrow$ correctness by bins.
   - Test-accuracy curves and overlays across runs.
-  - **Outlier export:** annotated grid of lowest-\(\pi\) test samples + CSV metadata.
+  - **Outlier export:** annotated grid of lowest-$\pi$ test samples + CSV metadata.
 
 ---
 
@@ -79,7 +79,7 @@ A GPU is recommended; the runner auto-selects `cuda` / `mps` / `cpu`.
   - Training: `--batch_size`, `--n_epoch`, `--seed`, `--early_stop`, `--early_stop_patience`, `--eval_val_every`, `--eval_test_every`.
   - Data & paths: `--dataset food101`, `--root_dir`, `--result_dir`, `--download/--no-download`.
 
-**Outputs (for `dataset=food101`, `method=arlvi_zscore`):**
+**Outputs (for `dataset=food101`, `method=arlv i_zscore`):**
 ```
 <result_dir>/food101/arlvi_zscore/
   best_s<seed>.pt
@@ -102,7 +102,7 @@ A GPU is recommended; the runner auto-selects `cuda` / `mps` / `cpu`.
 ## Results (summary)
 
 - **Accuracy parity with RLVI** on Food-101 under comparable schedules.
-- **Belief quality:** higher \( \pi \) bins consistently show higher accuracy; lowest-\(\pi\) samples are concentrated in the exported outlier grid and are visually inspectable.
+- **Belief quality:** higher $\pi$ bins consistently show higher accuracy; lowest-$\pi$ samples are concentrated in the exported outlier grid and are visually inspectable.
 - See `A_RLVI_report.pdf` for derivations, ablations (teacher temperature, EMA momentum), and extended plots.
 
 ---
