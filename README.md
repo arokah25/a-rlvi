@@ -124,14 +124,14 @@ Please cite RLVI and this implementation/report.
 }
 ```
 
-**This repository/report (placeholder):**
+**This repository/report:**
 ```
-@misc{rokah2025arlvi,
-  title={Amortized Robust Learning via Variational Inference (A-RLVI)},
-  author={Rokah, Adam},
-  year={2025},
-  note={Project report and code},
-  howpublished={\url{https://github.com/<your-username>/a-rlvi}}
+@techreport{rokah2025arlvi_report,
+  author      = {Adam Rokah},
+  title       = {Amortized Robust Learning via Variational Inference (A-RLVI)},
+  institution = {Uppsala University},
+  year        = {2025},
+  url         = {https://github.com/arokah25/a-rlvi/blob/main/A_RLVI_report.pdf},
 }
 ```
 
