@@ -16,7 +16,7 @@ To avoid collapse feedback (shrinking $\pi$ to reduce the weighted CE), this imp
 - **Detaches** $\pi$ from the classifier loss and **mean-normalizes** the weights so $\nabla_\phi L_\theta = 0$.
 - Trains the inference net **only** against a *detached teacher* built from **batch z-scored** CE:  
   `r_i = zscore(CE_i)`,  
-  `q_i(tau) = sigma(- r_i / tau + beta)`, with `beta = log( pi_bar / (1 - pi_bar) )` where `pi_bar` is an EMA of mean $\pi$.
+  `q_i() = sigma(- r_i / beta)`, with `beta = log( pi_bar / (1 - pi_bar) )` where `pi_bar` is an EMA of mean $\pi$.
 - Minimizes:  
   `(1/B) * sum_i KL( Bern(pi_i) || Bern(q_i) )`  (teacher-only objective for the inference net).
 
