@@ -15,9 +15,10 @@ Classical RLVI updates per-sample corruption variables via a fixed-point rule dr
 To avoid collapse feedback (shrinking $\pi$ to reduce the weighted CE), this implementation:
 - **Detaches** $\pi$ from the classifier loss and **mean-normalizes** the weights so $\nabla_\phi L_\theta = 0$.
 - Trains the inference net **only** against a *detached teacher* built from **batch z-scored** CE:  
-  $r_i=\mathrm{zscore}(\mathrm{CE}_i)$,  
-  $q_i(\tau)=\sigma(-\,r_i/\tau+\beta)$ with $\beta=\operatorname{logit}(\bar{\pi})$ from an EMA prior.
-- Minimizes $\tfrac{1}{B}\sum_i \mathrm{KL}\!\big(\operatorname{Bern}(\pi_i)\,\|\,\operatorname{Bern}(q_i)\big)$ for the inference net.
+  `r_i = zscore(CE_i)`,  
+  `q_i(tau) = sigma(- r_i / tau + beta)`, with `beta = log( pi_bar / (1 - pi_bar) )` where `pi_bar` is an EMA of mean $\pi$.
+- Minimizes:  
+  `(1/B) * sum_i KL( Bern(pi_i) || Bern(q_i) )`  (teacher-only objective for the inference net).
 
 Result: stable joint training, robust weighting, and informative $\pi$ distributions for auditing and outlier discovery.
 
@@ -46,7 +47,7 @@ deep-learning/
   train_arlvi_zscore.py      # A-RLVI (teacher-only z-score) single-epoch trainer
   methods.py                 # Method routing (regular, rlvi, arlvi_zscore, arlvi_bayes, etc.)
   amortized/
-    inference_net.py         # InferenceNet (LayerNorm + MLP → sigmoid π)
+    inference_net.py         # InferenceNet (LayerNorm + MLP → sigmoid pi)
   models/
     resnet.py, lenet.py      # Backbones (ResNet50 default for Food-101)
   data_load.py               # Food-101 loading & stratified train/val/test splits
@@ -79,7 +80,7 @@ A GPU is recommended; the runner auto-selects `cuda` / `mps` / `cpu`.
   - Training: `--batch_size`, `--n_epoch`, `--seed`, `--early_stop`, `--early_stop_patience`, `--eval_val_every`, `--eval_test_every`.
   - Data & paths: `--dataset food101`, `--root_dir`, `--result_dir`, `--download/--no-download`.
 
-**Outputs (for `dataset=food101`, `method=arlv i_zscore`):**
+**Outputs (for `dataset=food101`, `method=arlvi_zscore`):**
 ```
 <result_dir>/food101/arlvi_zscore/
   best_s<seed>.pt
