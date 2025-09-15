@@ -4,7 +4,7 @@ A-RLVI is a deep-learning extension of RLVI (Robust Learning via Variational Inf
 
 - **Primary dataset:** Food-101 (real label noise)  
 - **Backbone:** ImageNet-pretrained ResNet (default ResNet-50)  
-- **Report:** `A_RLVI_report.pdf` (derivations, design choices, ablations, results)
+- **Report:** [A_RLVI_report.pdf](https://github.com/user-attachments/files/22330674/A_RLVI_report.pdf) (derivations, design choices, ablations, results)
 
 ---
 
