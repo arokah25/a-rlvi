@@ -131,7 +131,6 @@ Please cite RLVI and this implementation/report.
   title       = {Amortized Robust Learning via Variational Inference (A-RLVI)},
   institution = {Uppsala University},
   year        = {2025},
-  url         = {[A_RLVI_report.pdf](https://github.com/user-attachments/files/22330674/A_RLVI_report.pdf},
 }
 ```
 
