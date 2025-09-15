@@ -45,6 +45,7 @@ Result: stable joint training, robust weighting, and informative $\pi$ distribut
 deep-learning/
   main.py                    # Runner: data, models, schedulers, early stopping, logging, outlier export
   train_arlvi_zscore.py      # A-RLVI (teacher-only z-score) single-epoch trainer
+  train_rlvi.py              # implementation of the baseline RLVI trainer
   methods.py                 # Method routing (regular, rlvi, arlvi_zscore, arlvi_bayes, etc.)
   amortized/
     inference_net.py         # InferenceNet (LayerNorm + MLP → sigmoid pi)
